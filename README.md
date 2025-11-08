@@ -125,9 +125,18 @@ python main.py --mode train --batch_size 2
 # 단일 GPU (16GB) + fp16
 python main.py --mode train --batch_size 4 --fp16
 
-# 4x GPU (16GB each) + fp16
-python main.py --mode train --batch_size 16 --fp16 --multi_gpu
+# 4x GPU (16GB each) + fp16 (빠른 validation)
+python main.py --mode train \
+    --batch_size 4 \
+    --val_batch_size 8 \
+    --fp16 \
+    --multi_gpu
 ```
+
+**Validation 속도 향상:**
+- `--val_batch_size`를 training batch size보다 크게 설정 가능
+- Validation은 gradient 계산이 없어 메모리 절약
+- 예: `--batch_size 2 --val_batch_size 8` → validation 4배 빠름
 
 ---
 
@@ -165,12 +174,13 @@ python main.py --mode train \
 **고급 옵션 (성능 향상):**
 
 ```bash
-# Mixed precision (fp16) + Multi-GPU 사용
+# Mixed precision (fp16) + Multi-GPU + 빠른 validation
 python main.py --mode train \
     --image_dir /path/to/train/images \
     --label_dir /path/to/train/labels \
     --epochs 100 \
-    --batch_size 4 \
+    --batch_size 2 \
+    --val_batch_size 4 \
     --fp16 \
     --multi_gpu
 ```
@@ -178,7 +188,8 @@ python main.py --mode train \
 - 이미지/레이블 폴더를 지정하면 자동으로 80/20 train/val split
 - `.nii`, `.nii.gz`, `.npy` 형식 지원
 - `--fp16`: Mixed precision training (메모리 절약 + 속도 향상)
-- `--multi_gpu`: 모든 가용 GPU 사용 (DataParallel)
+- `--multi_gpu`: 모든 가용 GPU 사용 (DataParallel, train & validation 모두)
+- `--val_batch_size`: Validation batch size (생략 시 batch_size와 동일)
 
 ### 테스트
 
@@ -313,10 +324,11 @@ python visualize.py \
 | 파라미터 | 기본값 | 설명 |
 |---------|--------|------|
 | `--epochs` | 100 | 학습 에포크 수 |
-| `--batch_size` | 2 | 배치 크기 |
+| `--batch_size` | 2 | Training 배치 크기 |
+| `--val_batch_size` | None | Validation 배치 크기 (None이면 batch_size와 동일) |
 | `--lr` | 1e-4 | Learning rate |
 | `--roi_size` | 32 | RoI 크기 (32³) |
 | `--val_split` | 0.2 | 검증 데이터 비율 |
 | `--fp16` | False | Mixed precision (fp16) 사용 |
-| `--multi_gpu` | False | 모든 가용 GPU 사용 |
+| `--multi_gpu` | False | 모든 가용 GPU 사용 (train & val) |
 | `--det_threshold` | 0.3 (train) / 0.1 (test) | Detection threshold |

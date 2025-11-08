@@ -222,7 +222,7 @@ class DetSegModel(nn.Module):
         rois = torch.cat(rois, dim=0)  # (N, 1, roi_size, roi_size, roi_size)
         return rois, roi_info
     
-    def forward(self, x, mode=None, return_loss=False, labels=None):
+    def forward(self, x, mode=None, return_loss=False, labels=None, return_simple=False):
         # Determine mode from model.training if not specified
         if mode is None:
             mode = 'train' if self.training else 'test'
@@ -272,6 +272,10 @@ class DetSegModel(nn.Module):
                 )
             else:
                 full_segmentation = torch.zeros_like(x)
+            
+            # Simple output for multi-GPU validation
+            if return_simple:
+                return full_segmentation  # Tensor only (DataParallel friendly)
             
             return {
                 'full_segmentation': full_segmentation,
@@ -410,14 +414,26 @@ def train_epoch(model, loader, optimizer, device, epoch, scaler=None, use_fp16=F
     return total_loss / len(loader)
 
 
-def validate(model, loader, device):
-    # Use single GPU for validation (batch_size=1)
-    if isinstance(model, nn.DataParallel):
-        model_eval = model.module
-    else:
-        model_eval = model
+def validate(model, loader, device, use_multi_gpu=False):
+    """
+    Validation with optional multi-GPU support
     
-    model_eval.eval()
+    Args:
+        use_multi_gpu: If True and model is DataParallel, use multi-GPU
+                       If False, use single GPU (more stable for debugging)
+    """
+    if use_multi_gpu and isinstance(model, nn.DataParallel):
+        # Multi-GPU validation (faster)
+        model.eval()
+        model_to_use = model
+    else:
+        # Single GPU validation (stable)
+        if isinstance(model, nn.DataParallel):
+            model_to_use = model.module
+        else:
+            model_to_use = model
+        model_to_use.eval()
+    
     dice_metric = DiceMetric(reduction='mean')
     
     with torch.no_grad():
@@ -426,9 +442,17 @@ def validate(model, loader, device):
             images = batch['image'].to(device)
             labels = batch['label'].to(device)
             
-            # Inference - 전체 segmentation 반환
-            outputs = model_eval(images)
-            full_seg = outputs['full_segmentation']
+            # Inference - simple output for multi-GPU compatibility
+            if use_multi_gpu and isinstance(model, nn.DataParallel):
+                # Return tensor only (DataParallel friendly)
+                full_seg = model_to_use(images, return_simple=True)
+            else:
+                # Single GPU - can return full dict
+                outputs = model_to_use(images)
+                if isinstance(outputs, dict):
+                    full_seg = outputs['full_segmentation']
+                else:
+                    full_seg = outputs
             
             # Threshold
             full_seg_binary = (full_seg > 0.5).float()
@@ -521,6 +545,7 @@ def main():
     parser.add_argument('--output_dir', type=str, default='./outputs')
     parser.add_argument('--epochs', type=int, default=100)
     parser.add_argument('--batch_size', type=int, default=2)
+    parser.add_argument('--val_batch_size', type=int, default=None, help='Validation batch size (default: same as batch_size)')
     parser.add_argument('--lr', type=float, default=1e-4)
     parser.add_argument('--roi_size', type=int, default=32)
     parser.add_argument('--val_split', type=float, default=0.2, help='검증 데이터 비율')
@@ -528,6 +553,10 @@ def main():
     parser.add_argument('--fp16', action='store_true', help='Mixed precision training (fp16)')
     parser.add_argument('--multi_gpu', action='store_true', help='Use all available GPUs')
     args = parser.parse_args()
+    
+    # Set validation batch size
+    if args.val_batch_size is None:
+        args.val_batch_size = args.batch_size
     
     # Create output directory
     os.makedirs(args.output_dir, exist_ok=True)
@@ -569,7 +598,7 @@ def main():
         )
         val_loader = DataLoader(
             val_dataset, 
-            batch_size=1, 
+            batch_size=args.val_batch_size, 
             shuffle=False, 
             num_workers=2,
             collate_fn=pad_list_data_collate
@@ -583,6 +612,8 @@ def main():
         # Multi-GPU
         if args.multi_gpu and torch.cuda.device_count() > 1:
             print(f"Using {torch.cuda.device_count()} GPUs with DataParallel")
+            print(f"  - Training batch size: {args.batch_size} per GPU")
+            print(f"  - Validation batch size: {args.val_batch_size} per GPU")
             model = nn.DataParallel(model)
         
         optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr)
@@ -606,7 +637,10 @@ def main():
         
         for epoch in range(args.epochs):
             train_loss = train_epoch(model, train_loader, optimizer, args.device, epoch, scaler, args.fp16)
-            val_score = validate(model, val_loader, args.device)
+            
+            # Validation with multi-GPU if available
+            use_multi_gpu = args.multi_gpu and isinstance(model, nn.DataParallel)
+            val_score = validate(model, val_loader, args.device, use_multi_gpu=use_multi_gpu)
             
             # Set model back to train mode after validation
             model.train()
