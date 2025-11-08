@@ -20,25 +20,31 @@ Stage 2: Segmentation Network (per RoI)
 
 ## Architecture
 
-### Stage 1: Detection Network (Enhanced)
+### Stage 1: Detection Network (CenterNet-style) ⭐
 
 **입력:** 원본 3D volume (no patches)  
 **출력:** RoI coordinates + confidence scores
 
 **구조:**
 - **MONAI ResNet-style backbone** with residual connections
-- Multi-scale feature extraction (3 levels)
+- Multi-scale feature extraction (3 levels, 8× downsampling)
 - Feature fusion layer
-- Anchor-free detection heads
-  - Center heatmap
-  - Bounding box size
-  - Center offset
+- **CenterNet-style anchor-free heads**
+  - **Center heatmap** (Gaussian): 병변 중심점 위치
+  - **Bounding box size** (3D): (d, h, w) 예측
+  - **Center offset** (sub-pixel): 정밀한 중심 좌표
+
+**Training (CenterNet Style):**
+1. **GT Generation**: Segmentation label → Connected Components → BBoxes
+2. **Gaussian Heatmap**: 각 bbox center에 Gaussian kernel 생성
+3. **Size Target**: 각 center point에서 bbox 크기 학습
+4. **Offset Target**: Sub-pixel refinement
 
 **특징:**
-- 강력한 feature extraction (ResidualUnit × 6)
-- Multi-scale feature aggregation
-- High recall을 위한 low threshold (0.1)
-- 3D NMS로 중복 제거
+- ✅ **Proper Detection Training**: Size와 Offset이 실제로 학습됨
+- ✅ **Multi-scale Support**: 다양한 크기의 병변 대응
+- ✅ **Gaussian Heatmap**: CenterNet 논문과 동일한 방식
+- ✅ **Anchor-free**: Anchor 없이 직접 예측
 - Parameters: ~2.5M (적절한 균형)
 
 ### Stage 2: Segmentation Network (Enhanced)
@@ -63,15 +69,32 @@ Stage 2: Segmentation Network (per RoI)
 
 ## Loss Functions
 
-### Stage 1: Detection Loss
+### Stage 1: Detection Loss (CenterNet Style)
 
+```python
+# 1. GT Generation (from segmentation label)
+batch_bboxes = extract_bboxes_from_label(gt_label)  # Connected components
+
+# 2. Generate Gaussian targets
+gt_heatmap = generate_gaussian_heatmap(bboxes)      # Gaussian at centers
+gt_size = extract_size_at_centers(bboxes)           # Size at center points
+gt_offset = extract_offset_at_centers(bboxes)       # Sub-pixel offset
+
+# 3. Loss computation (CenterNet)
+L_det = Focal(pred_heatmap, gt_heatmap) 
+      + 0.5 × L1(pred_size, gt_size)[positive_points]
+      + 0.1 × L1(pred_offset, gt_offset)[positive_points]
 ```
-L_det = Focal(heatmap) + L1(size) + L1(offset)
-```
+
+**핵심:**
+- ✅ **GT BBox**: Segmentation label → Connected components → Real bboxes
+- ✅ **Gaussian Heatmap**: 각 bbox center에 Gaussian 생성
+- ✅ **Positive Points**: GT center에서만 size/offset loss 계산
+- ✅ **Proper Training**: Size와 Offset이 실제 값 학습
 
 ### Stage 2: Segmentation Loss
 
-```
+```python
 L_seg = (1/N) Σᵢ [Dice(mask_i) + BCE(mask_i)]
 ```
 
@@ -290,17 +313,18 @@ roi_info = outputs['roi_info']            # RoI 정보 (bbox, confidence)
 
 ## 구현 상태
 
+✅ **CenterNet-style Detection** ⭐ (Proper bbox regression with Gaussian heatmap)  
 ✅ **Enhanced Detection network** (MONAI ResNet-style backbone)  
 ✅ **Enhanced Segmentation network** (Deeper U-Net with residual units)  
 ✅ **Adaptive RoI Processing** ⭐ (작은 병변 해상도 100% 보존)  
+✅ **GT BBox extraction** (Connected components from segmentation labels)  
 ✅ End-to-end pipeline  
 ✅ Data loading (auto train/val split)  
 ✅ **RoI → Full segmentation 재구성**  
 ✅ **Evaluation metrics (Dice score)**  
 ✅ **결과 저장 및 시각화**  
 ✅ **Multi-GPU support** (DataParallel)  
-✅ **Mixed precision training** (fp16)  
-⚠️ GT RoI extraction for training (simplified - 개선 필요)
+✅ **Mixed precision training** (fp16)
 
 ---
 

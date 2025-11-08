@@ -533,26 +533,195 @@ class MedicalDataset(Dataset):
 
 
 # ============================================================================
-# Loss Functions
+# Loss Functions - CenterNet Style
 # ============================================================================
+
+def extract_bboxes_from_label(gt_label):
+    """
+    Extract bounding boxes from segmentation label using connected components
+    
+    Args:
+        gt_label: (B, 1, D, H, W) segmentation mask
+    
+    Returns:
+        batch_bboxes: List of List[dict] - bboxes for each batch item
+    """
+    import scipy.ndimage as ndimage
+    
+    batch_size = gt_label.shape[0]
+    batch_bboxes = []
+    
+    for b in range(batch_size):
+        label_np = gt_label[b, 0].cpu().numpy()
+        
+        # Connected components
+        labeled, num_features = ndimage.label(label_np > 0)
+        
+        bboxes = []
+        for i in range(1, num_features + 1):
+            mask = (labeled == i)
+            coords = np.argwhere(mask)
+            
+            if len(coords) == 0:
+                continue
+            
+            # Get bbox coordinates
+            d_min, h_min, w_min = coords.min(axis=0)
+            d_max, h_max, w_max = coords.max(axis=0)
+            
+            # Center and size
+            center_d = (d_min + d_max) / 2.0
+            center_h = (h_min + h_max) / 2.0
+            center_w = (w_min + w_max) / 2.0
+            
+            size_d = d_max - d_min + 1
+            size_h = h_max - h_min + 1
+            size_w = w_max - w_min + 1
+            
+            bboxes.append({
+                'center': np.array([center_d, center_h, center_w], dtype=np.float32),
+                'size': np.array([size_d, size_h, size_w], dtype=np.float32),
+                'bbox': (d_min, h_min, w_min, d_max, h_max, w_max)
+            })
+        
+        batch_bboxes.append(bboxes)
+    
+    return batch_bboxes
+
+
+def gaussian_3d(shape, center, sigma=2.0):
+    """
+    Generate 3D Gaussian kernel
+    
+    Args:
+        shape: (D, H, W)
+        center: (d, h, w) center coordinates
+        sigma: Gaussian standard deviation
+    
+    Returns:
+        gaussian: (D, H, W) Gaussian heatmap
+    """
+    D, H, W = shape
+    cd, ch, cw = center
+    
+    d = np.arange(0, D, dtype=np.float32)
+    h = np.arange(0, H, dtype=np.float32)
+    w = np.arange(0, W, dtype=np.float32)
+    
+    d = d[:, np.newaxis, np.newaxis]
+    h = h[np.newaxis, :, np.newaxis]
+    w = w[np.newaxis, np.newaxis, :]
+    
+    d0 = cd
+    h0 = ch
+    w0 = cw
+    
+    gaussian = np.exp(-((d - d0) ** 2 + (h - h0) ** 2 + (w - w0) ** 2) / (2 * sigma ** 2))
+    
+    return gaussian
+
+
+def generate_centerdet_targets(batch_bboxes, output_shape, stride=8):
+    """
+    Generate CenterNet-style targets (heatmap, size, offset)
+    
+    Args:
+        batch_bboxes: List of List[dict] - bboxes for each batch item
+        output_shape: (B, D, H, W) output feature map shape
+        stride: Downsampling stride (default 8)
+    
+    Returns:
+        gt_heatmap: (B, 1, D, H, W)
+        gt_size: (B, 3, D, H, W)
+        gt_offset: (B, 3, D, H, W)
+    """
+    B, D, H, W = output_shape
+    device = 'cuda' if torch.cuda.is_available() else 'cpu'
+    
+    gt_heatmap = torch.zeros(B, 1, D, H, W, dtype=torch.float32, device=device)
+    gt_size = torch.zeros(B, 3, D, H, W, dtype=torch.float32, device=device)
+    gt_offset = torch.zeros(B, 3, D, H, W, dtype=torch.float32, device=device)
+    
+    for b, bboxes in enumerate(batch_bboxes):
+        for bbox in bboxes:
+            center = bbox['center']  # Original resolution
+            size = bbox['size']      # Original resolution
+            
+            # Convert to heatmap resolution
+            center_d = center[0] / stride
+            center_h = center[1] / stride
+            center_w = center[2] / stride
+            
+            # Integer center for heatmap
+            ct_int_d = int(center_d)
+            ct_int_h = int(center_h)
+            ct_int_w = int(center_w)
+            
+            # Skip if out of bounds
+            if ct_int_d < 0 or ct_int_d >= D or ct_int_h < 0 or ct_int_h >= H or ct_int_w < 0 or ct_int_w >= W:
+                continue
+            
+            # 1. Gaussian heatmap (CenterNet style)
+            radius = max(1, int(np.ceil(min(size) / stride / 4)))  # Adaptive radius
+            gaussian = gaussian_3d((D, H, W), (center_d, center_h, center_w), sigma=radius)
+            gaussian_tensor = torch.from_numpy(gaussian).to(device)
+            
+            # Max pooling (multiple objects may overlap)
+            gt_heatmap[b, 0] = torch.max(gt_heatmap[b, 0], gaussian_tensor)
+            
+            # 2. Size target (at center point)
+            gt_size[b, 0, ct_int_d, ct_int_h, ct_int_w] = size[0] / stride
+            gt_size[b, 1, ct_int_d, ct_int_h, ct_int_w] = size[1] / stride
+            gt_size[b, 2, ct_int_d, ct_int_h, ct_int_w] = size[2] / stride
+            
+            # 3. Offset target (sub-pixel refinement)
+            gt_offset[b, 0, ct_int_d, ct_int_h, ct_int_w] = center_d - ct_int_d
+            gt_offset[b, 1, ct_int_d, ct_int_h, ct_int_w] = center_h - ct_int_h
+            gt_offset[b, 2, ct_int_d, ct_int_h, ct_int_w] = center_w - ct_int_w
+    
+    return gt_heatmap, gt_size, gt_offset
+
 
 def detection_loss(pred_heatmap, pred_size, pred_offset, gt_label, focal_alpha=2.0):
     """
-    Detection loss
-    GT generation: create heatmap, size, offset from segmentation label
-    """
-    # GT heatmap generation (간단한 버전 - 실제로는 Gaussian 사용)
-    gt_heatmap = (gt_label > 0).float().max(dim=1, keepdim=True)[0]  # any foreground
-    gt_heatmap = F.max_pool3d(gt_heatmap, kernel_size=3, stride=8, padding=1)  # downsample
+    CenterNet-style Detection Loss
     
-    # Focal loss for heatmap
+    Args:
+        pred_heatmap: (B, 1, D/8, H/8, W/8) predicted heatmap
+        pred_size: (B, 3, D/8, H/8, W/8) predicted bbox size
+        pred_offset: (B, 3, D/8, H/8, W/8) predicted offset
+        gt_label: (B, 1, D, H, W) ground truth segmentation
+    
+    Returns:
+        total_loss: scalar
+    """
+    # 1. Extract GT bboxes from segmentation label
+    batch_bboxes = extract_bboxes_from_label(gt_label)
+    
+    # 2. Generate CenterNet targets
+    B, _, D, H, W = pred_heatmap.shape
+    gt_heatmap, gt_size, gt_offset = generate_centerdet_targets(
+        batch_bboxes, (B, D, H, W), stride=8
+    )
+    
+    # 3. Heatmap loss (Focal Loss)
     focal_loss = FocalLoss()(pred_heatmap, gt_heatmap)
     
-    # Size and offset loss (simplified - 실제로는 GT bbox 필요)
-    size_loss = F.l1_loss(pred_size, torch.zeros_like(pred_size))
-    offset_loss = F.l1_loss(pred_offset, torch.zeros_like(pred_offset))
+    # 4. Size and offset loss (only at positive locations)
+    # Positive mask: where GT heatmap > 0.5 (center points)
+    pos_mask = (gt_heatmap > 0.5).float()
+    num_pos = pos_mask.sum().clamp(min=1.0)
     
-    return focal_loss + 0.1 * size_loss + 0.1 * offset_loss
+    # Size loss (L1)
+    size_loss = F.l1_loss(pred_size * pos_mask, gt_size * pos_mask, reduction='sum') / num_pos
+    
+    # Offset loss (L1)
+    offset_loss = F.l1_loss(pred_offset * pos_mask, gt_offset * pos_mask, reduction='sum') / num_pos
+    
+    # Total loss
+    total_loss = focal_loss + 0.5 * size_loss + 0.1 * offset_loss
+    
+    return total_loss
 
 
 def segmentation_loss(pred_masks, gt_rois):
