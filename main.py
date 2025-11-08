@@ -222,7 +222,11 @@ class DetSegModel(nn.Module):
         rois = torch.cat(rois, dim=0)  # (N, 1, roi_size, roi_size, roi_size)
         return rois, roi_info
     
-    def forward(self, x, mode='train'):
+    def forward(self, x, mode=None):
+        # Determine mode from model.training if not specified
+        if mode is None:
+            mode = 'train' if self.training else 'test'
+        
         # Stage 1: Detection
         heatmap, size, offset = self.detection_net(x)
         
@@ -362,9 +366,9 @@ def train_epoch(model, loader, optimizer, device, epoch, scaler=None, use_fp16=F
         
         # Mixed precision training
         if use_fp16 and scaler is not None:
-            with torch.cuda.amp.autocast():
+            with torch.amp.autocast('cuda'):
                 # Forward
-                outputs = model(images, mode='train')
+                outputs = model(images)
                 
                 # Loss
                 det_loss = detection_loss(
@@ -389,7 +393,7 @@ def train_epoch(model, loader, optimizer, device, epoch, scaler=None, use_fp16=F
         else:
             # Normal training
             # Forward
-            outputs = model(images, mode='train')
+            outputs = model(images)
             
             # Loss
             det_loss = detection_loss(
@@ -430,7 +434,7 @@ def validate(model, loader, device):
             labels = batch['label'].to(device)
             
             # Inference - 전체 segmentation 반환
-            outputs = model(images, mode='test')
+            outputs = model(images)
             full_seg = outputs['full_segmentation']
             
             # Threshold
@@ -463,7 +467,7 @@ def test_and_save(model, loader, device, output_dir):
             labels = batch['label'].to(device)
             
             # Inference
-            outputs = model(images, mode='test')
+            outputs = model(images)
             full_seg = outputs['full_segmentation']
             roi_info = outputs['roi_info']
             
@@ -589,7 +593,7 @@ def main():
         scaler = None
         if args.fp16:
             if args.device == 'cuda':
-                scaler = torch.cuda.amp.GradScaler()
+                scaler = torch.amp.GradScaler('cuda')
                 print("Using mixed precision training (fp16)")
             else:
                 print("Warning: fp16 only works with CUDA. Ignoring --fp16 flag.")

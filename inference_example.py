@@ -46,8 +46,9 @@ def inference_single_image(model, image_path, device='cuda'):
     image_tensor = image_tensor.to(device)
     
     # Inference
+    model.eval()
     with torch.no_grad():
-        outputs = model(image_tensor, mode='test')
+        outputs = model(image_tensor)
     
     # Extract results
     full_seg = outputs['full_segmentation'][0, 0].cpu().numpy()  # (D, H, W)
