@@ -411,7 +411,13 @@ def train_epoch(model, loader, optimizer, device, epoch, scaler=None, use_fp16=F
 
 
 def validate(model, loader, device):
-    model.eval()
+    # Use single GPU for validation (batch_size=1)
+    if isinstance(model, nn.DataParallel):
+        model_eval = model.module
+    else:
+        model_eval = model
+    
+    model_eval.eval()
     dice_metric = DiceMetric(reduction='mean')
     
     with torch.no_grad():
@@ -421,7 +427,7 @@ def validate(model, loader, device):
             labels = batch['label'].to(device)
             
             # Inference - 전체 segmentation 반환
-            outputs = model(images)
+            outputs = model_eval(images)
             full_seg = outputs['full_segmentation']
             
             # Threshold
@@ -439,7 +445,13 @@ def validate(model, loader, device):
 
 def test_and_save(model, loader, device, output_dir):
     """Test and save segmentation results"""
-    model.eval()
+    # Use single GPU for testing (batch_size=1)
+    if isinstance(model, nn.DataParallel):
+        model_eval = model.module
+    else:
+        model_eval = model
+    
+    model_eval.eval()
     dice_metric = DiceMetric(reduction='mean')
     
     os.makedirs(output_dir, exist_ok=True)
@@ -454,7 +466,7 @@ def test_and_save(model, loader, device, output_dir):
             labels = batch['label'].to(device)
             
             # Inference
-            outputs = model(images)
+            outputs = model_eval(images)
             full_seg = outputs['full_segmentation']
             roi_info = outputs['roi_info']
             
@@ -595,6 +607,10 @@ def main():
         for epoch in range(args.epochs):
             train_loss = train_epoch(model, train_loader, optimizer, args.device, epoch, scaler, args.fp16)
             val_score = validate(model, val_loader, args.device)
+            
+            # Set model back to train mode after validation
+            model.train()
+            
             scheduler.step()
             
             print(f"Epoch {epoch:3d} | Train Loss: {train_loss:.4f} | Val Dice: {val_score:.4f}", end="")
