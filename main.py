@@ -158,6 +158,7 @@ class SegmentationNetwork(nn.Module):
         self.roi_size = roi_size
         
         # Enhanced 3D U-Net with more depth and residual units
+        # Using InstanceNorm for stability with small ROIs (BatchNorm fails on 1x1x1 features)
         self.unet = UNet(
             spatial_dims=3,
             in_channels=1,
@@ -165,7 +166,7 @@ class SegmentationNetwork(nn.Module):
             channels=(32, 64, 128, 256),  # Deeper network
             strides=(2, 2, 2),
             num_res_units=2,  # More residual units per level
-            norm='batch',
+            norm='instance',  # Changed from 'batch' to 'instance' for small ROI stability
             act='relu',
             dropout=0.1,
         )
@@ -354,6 +355,12 @@ class DetSegModel(nn.Module):
                     resized_roi = F.interpolate(roi_crop, size=(pad_d, pad_h, pad_w),
                                                 mode='trilinear', align_corners=False)
                     final_size = (pad_d, pad_h, pad_w)
+                
+                # Skip ROIs that are too small (will cause BatchNorm issues)
+                # Minimum size to avoid 1x1x1 after downsampling
+                min_size = 16  # With 3 levels of stride-2 downsampling: 16/2/2/2 = 2
+                if final_size[0] < min_size or final_size[1] < min_size or final_size[2] < min_size:
+                    continue  # Skip this ROI
                 
                 # Convert MetaTensor to regular tensor to avoid metadata conflicts
                 if hasattr(resized_roi, 'as_tensor'):
