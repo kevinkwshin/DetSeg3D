@@ -713,6 +713,7 @@ def main():
     parser.add_argument('--max_rois', type=int, default=100, help='Maximum number of RoIs to extract per image')
     parser.add_argument('--val_threshold', type=float, default=0.1, help='Detection threshold for validation/test')
     parser.add_argument('--roi_batch_size', type=int, default=32, help='Mini-batch size for RoI segmentation')
+    parser.add_argument('--val_interval', type=int, default=1, help='Validation interval (epochs)')
     args = parser.parse_args()
     
     # Set validation batch size
@@ -802,6 +803,7 @@ def main():
         print(f"  - Max RoIs per image: {args.max_rois}")
         print(f"  - Val/Test threshold: {args.val_threshold}")
         print(f"  - RoI mini-batch size: {args.roi_batch_size}")
+        print(f"  - Validation interval: every {args.val_interval} epoch(s)")
         
         # Multi-GPU
         if args.multi_gpu and torch.cuda.device_count() > 1:
@@ -840,26 +842,31 @@ def main():
         for epoch in range(args.epochs):
             train_loss = train_epoch(model, train_loader, optimizer, args.device, epoch, scaler, args.fp16)
             
-            # Validation - use single GPU for memory stability
-            # (multi-GPU validation can cause OOM when gathering large full_segmentation tensors)
-            val_score = validate(model, val_loader, args.device, use_multi_gpu=False)
-            
-            # Set model back to train mode after validation
-            model.train()
+            # Validation - run every val_interval epochs
+            if (epoch + 1) % args.val_interval == 0 or epoch == args.epochs - 1:
+                # Use single GPU for memory stability
+                # (multi-GPU validation can cause OOM when gathering large full_segmentation tensors)
+                val_score = validate(model, val_loader, args.device, use_multi_gpu=False)
+                
+                # Set model back to train mode after validation
+                model.train()
+                
+                print(f"Epoch {epoch:3d} | Train Loss: {train_loss:.4f} | Val Dice: {val_score:.4f}", end="")
+                
+                # Save checkpoint
+                if val_score > best_val:
+                    best_val = val_score
+                    # Save model (handle DataParallel)
+                    model_to_save = model.module if hasattr(model, 'module') else model
+                    torch.save(model_to_save.state_dict(), os.path.join(args.output_dir, 'best_model.pth'))
+                    print(f" | ★ Best!")
+                else:
+                    print()
+            else:
+                # Skip validation, only print training loss
+                print(f"Epoch {epoch:3d} | Train Loss: {train_loss:.4f} | Val: skipped")
             
             scheduler.step()
-            
-            print(f"Epoch {epoch:3d} | Train Loss: {train_loss:.4f} | Val Dice: {val_score:.4f}", end="")
-            
-            # Save checkpoint
-            if val_score > best_val:
-                best_val = val_score
-                # Save model (handle DataParallel)
-                model_to_save = model.module if hasattr(model, 'module') else model
-                torch.save(model_to_save.state_dict(), os.path.join(args.output_dir, 'best_model.pth'))
-                print(f" | ★ Best!")
-            else:
-                print()
         
         print(f"\n{'='*70}")
         print(f"Training completed! Best Val Dice: {best_val:.4f}")

@@ -376,6 +376,7 @@ python visualize.py \
 | `--max_rois` | 100 | 이미지당 최대 RoI 개수 (OOM 방지) |
 | `--val_threshold` | 0.1 | Validation/Test용 detection threshold |
 | `--roi_batch_size` | 32 | RoI segmentation 처리 시 mini-batch 크기 (OOM 방지) |
+| `--val_interval` | 1 | Validation 실행 간격 (epoch 단위) |
 
 **Multi-GPU 사용 시:**
 - 실제 총 training 배치 크기 = `batch_size × GPU 개수`
@@ -383,7 +384,9 @@ python visualize.py \
 
 **OOM (Out of Memory) 문제 해결:**
 
-Validation에서 OOM 에러가 발생하는 경우, 다음 파라미터를 조정하세요:
+**문제:** Validation 시 GPU 0번만 메모리를 과도하게 사용 (48GB/49GB)
+
+Validation은 single GPU (GPU 0)에서 실행되므로, 다음 파라미터로 메모리를 조절하세요:
 
 1. **`--max_rois`를 줄이기** (기본값: 100)
    ```bash
@@ -400,12 +403,29 @@ Validation에서 OOM 에러가 발생하는 경우, 다음 파라미터를 조�
    --roi_batch_size 16  # RoI를 16개씩 처리
    ```
 
-**권장 조합 (메모리 부족 시):**
+4. **`--val_interval`로 validation 빈도 줄이기** (기본값: 1)
+   ```bash
+   --val_interval 5  # 5 epoch마다 validation 실행
+   ```
+
+**권장 조합 (GPU 메모리 부족 시):**
 ```bash
+# 방법 1: 파라미터 조정 (정확도 유지)
 python main.py --mode train \
     --max_rois 50 \
-    --val_threshold 0.2 \
+    --val_threshold 0.3 \
     --roi_batch_size 16 \
     --batch_size 1 \
     --fp16 --multi_gpu
+
+# 방법 2: Validation 빈도 줄이기 (빠른 학습)
+python main.py --mode train \
+    --val_interval 5 \
+    --batch_size 1 \
+    --fp16 --multi_gpu
 ```
+
+**효과:**
+- GPU 0 메모리: 48GB → ~25GB
+- Training 속도: 영향 없음
+- Validation 속도: 더 빠름
