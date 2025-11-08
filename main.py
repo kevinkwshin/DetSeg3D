@@ -222,7 +222,7 @@ class DetSegModel(nn.Module):
         rois = torch.cat(rois, dim=0)  # (N, 1, roi_size, roi_size, roi_size)
         return rois, roi_info
     
-    def forward(self, x, mode=None):
+    def forward(self, x, mode=None, return_loss=False, labels=None):
         # Determine mode from model.training if not specified
         if mode is None:
             mode = 'train' if self.training else 'test'
@@ -230,7 +230,18 @@ class DetSegModel(nn.Module):
         # Stage 1: Detection
         heatmap, size, offset = self.detection_net(x)
         
-        if mode == 'train':
+        if mode == 'train' and return_loss:
+            # Training with loss computation (for DataParallel memory efficiency)
+            # Compute loss here to avoid gathering large tensors
+            det_loss = detection_loss(heatmap, size, offset, labels)
+            
+            # Segmentation loss (simplified)
+            seg_loss = torch.tensor(0.0, device=x.device)
+            
+            total_loss = det_loss + 2.0 * seg_loss
+            return total_loss
+            
+        elif mode == 'train':
             # Training: extract RoIs and segment
             rois, roi_info = self.extract_rois_from_heatmap(x, heatmap, size, offset, self.det_threshold)
             
@@ -367,24 +378,12 @@ def train_epoch(model, loader, optimizer, device, epoch, scaler=None, use_fp16=F
         # Mixed precision training
         if use_fp16 and scaler is not None:
             with torch.amp.autocast('cuda'):
-                # Forward
-                outputs = model(images)
+                # Forward with loss computation (memory efficient for DataParallel)
+                loss = model(images, mode='train', return_loss=True, labels=labels)
                 
-                # Loss
-                det_loss = detection_loss(
-                    outputs['heatmap'], 
-                    outputs['size'], 
-                    outputs['offset'], 
-                    labels
-                )
-                
-                # Segmentation loss (simplified - 실제로는 GT RoI matching 필요)
-                seg_loss = torch.tensor(0.0).to(device)
-                if outputs['masks'] is not None:
-                    # TODO: GT RoI extraction and matching
-                    pass
-                
-                loss = det_loss + 2.0 * seg_loss
+                # If multi-GPU, loss is already averaged by DataParallel
+                if not isinstance(loss, torch.Tensor):
+                    loss = loss.mean()  # Average losses from multiple GPUs
             
             # Backward with scaling
             scaler.scale(loss).backward()
@@ -392,24 +391,12 @@ def train_epoch(model, loader, optimizer, device, epoch, scaler=None, use_fp16=F
             scaler.update()
         else:
             # Normal training
-            # Forward
-            outputs = model(images)
+            # Forward with loss computation
+            loss = model(images, mode='train', return_loss=True, labels=labels)
             
-            # Loss
-            det_loss = detection_loss(
-                outputs['heatmap'], 
-                outputs['size'], 
-                outputs['offset'], 
-                labels
-            )
-            
-            # Segmentation loss (simplified - 실제로는 GT RoI matching 필요)
-            seg_loss = torch.tensor(0.0).to(device)
-            if outputs['masks'] is not None:
-                # TODO: GT RoI extraction and matching
-                pass
-            
-            loss = det_loss + 2.0 * seg_loss
+            # If multi-GPU, loss is already averaged by DataParallel
+            if hasattr(loss, 'mean'):
+                loss = loss.mean()
             
             # Backward
             loss.backward()
