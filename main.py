@@ -329,22 +329,31 @@ class DetSegModel(nn.Module):
                 max_dim = max(orig_d, orig_h, orig_w)
                 
                 if max_dim < self.small_roi_threshold:
-                    # Small ROI: keep original size! (preserve details for small lesions)
-                    resized_roi = roi_crop
-                    final_size = (orig_d, orig_h, orig_w)
+                    # Small ROI: keep original size but pad to U-Net compatible size (8의 배수)
+                    # U-Net has 3 levels of downsampling (stride=2), so need multiples of 2^3=8
+                    pad_d = ((orig_d + 7) // 8) * 8
+                    pad_h = ((orig_h + 7) // 8) * 8
+                    pad_w = ((orig_w + 7) // 8) * 8
+                    resized_roi = F.interpolate(roi_crop, size=(pad_d, pad_h, pad_w),
+                                                mode='trilinear', align_corners=False)
+                    final_size = (pad_d, pad_h, pad_w)
                 elif max_dim > self.max_roi_size:
-                    # Large ROI: resize with aspect ratio preservation
+                    # Large ROI: resize with aspect ratio preservation to multiples of 8
                     scale = self.max_roi_size / max_dim
-                    new_d = max(1, int(orig_d * scale))
-                    new_h = max(1, int(orig_h * scale))
-                    new_w = max(1, int(orig_w * scale))
+                    new_d = max(8, ((int(orig_d * scale) + 7) // 8) * 8)
+                    new_h = max(8, ((int(orig_h * scale) + 7) // 8) * 8)
+                    new_w = max(8, ((int(orig_w * scale) + 7) // 8) * 8)
                     resized_roi = F.interpolate(roi_crop, size=(new_d, new_h, new_w),
                                                 mode='trilinear', align_corners=False)
                     final_size = (new_d, new_h, new_w)
                 else:
-                    # Medium ROI: keep original
-                    resized_roi = roi_crop
-                    final_size = (orig_d, orig_h, orig_w)
+                    # Medium ROI: pad to multiples of 8
+                    pad_d = ((orig_d + 7) // 8) * 8
+                    pad_h = ((orig_h + 7) // 8) * 8
+                    pad_w = ((orig_w + 7) // 8) * 8
+                    resized_roi = F.interpolate(roi_crop, size=(pad_d, pad_h, pad_w),
+                                                mode='trilinear', align_corners=False)
+                    final_size = (pad_d, pad_h, pad_w)
                 
                 # Convert MetaTensor to regular tensor to avoid metadata conflicts
                 if hasattr(resized_roi, 'as_tensor'):
