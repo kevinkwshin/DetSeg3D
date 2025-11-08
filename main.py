@@ -378,6 +378,13 @@ def train_epoch(model, loader, optimizer, device, epoch, scaler=None, use_fp16=F
         images = batch['image'].to(device)
         labels = batch['label'].to(device)
         
+        # Debug: print input size on first batch
+        if batch_idx == 0:
+            print(f"\n[DEBUG] Input shape: {images.shape}")
+            print(f"[DEBUG] Label shape: {labels.shape}")
+            print(f"[DEBUG] Image dtype: {images.dtype}")
+            print(f"[DEBUG] Memory allocated: {torch.cuda.memory_allocated(device)/1024**2:.1f} MB")
+        
         optimizer.zero_grad()
         
         # Mixed precision training
