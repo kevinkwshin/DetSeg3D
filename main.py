@@ -600,16 +600,21 @@ def main():
             full_dataset, [train_size, val_size]
         )
         
+        # Calculate effective batch size for multi-GPU
+        num_gpus = torch.cuda.device_count() if args.multi_gpu else 1
+        effective_batch_size = args.batch_size * num_gpus if args.multi_gpu else args.batch_size
+        effective_val_batch_size = args.val_batch_size * num_gpus if args.multi_gpu else args.val_batch_size
+        
         train_loader = DataLoader(
             train_dataset, 
-            batch_size=args.batch_size, 
+            batch_size=effective_batch_size, 
             shuffle=True, 
             num_workers=4,
             collate_fn=pad_list_data_collate
         )
         val_loader = DataLoader(
             val_dataset, 
-            batch_size=args.val_batch_size, 
+            batch_size=effective_val_batch_size, 
             shuffle=False, 
             num_workers=2,
             collate_fn=pad_list_data_collate
@@ -622,11 +627,19 @@ def main():
         
         # Multi-GPU
         if args.multi_gpu and torch.cuda.device_count() > 1:
-            print(f"Using {torch.cuda.device_count()} GPUs with DataParallel")
-            print(f"  - Training batch size: {args.batch_size} per GPU")
-            print(f"  - Validation batch size: {args.val_batch_size} per GPU")
+            print(f"\nUsing {num_gpus} GPUs with DataParallel")
+            print(f"  - Batch size per GPU: {args.batch_size}")
+            print(f"  - Total effective batch size: {effective_batch_size}")
+            print(f"  - Validation batch size per GPU: {args.val_batch_size}")
+            print(f"  - Total validation batch size: {effective_val_batch_size}")
             model = nn.DataParallel(model)
+        else:
+            print(f"\nUsing single GPU/CPU")
+            print(f"  - Batch size: {args.batch_size}")
         
+        # Scale learning rate with batch size (optional but recommended)
+        # effective_lr = args.lr * (effective_batch_size / args.batch_size)
+        # For now, use base lr
         optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr)
         scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=args.epochs)
         
