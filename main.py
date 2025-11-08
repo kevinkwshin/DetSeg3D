@@ -164,6 +164,7 @@ class DetSegModel(nn.Module):
         self.segmentation_net = SegmentationNetwork(roi_size=roi_size)
         self.roi_size = roi_size
         self.det_threshold = det_threshold
+        self.return_simple = False  # For multi-GPU validation
         
     def extract_rois_from_heatmap(self, volume, heatmap, size, offset, threshold=0.3):
         """Extract RoI crops from detection heatmap"""
@@ -222,7 +223,7 @@ class DetSegModel(nn.Module):
         rois = torch.cat(rois, dim=0)  # (N, 1, roi_size, roi_size, roi_size)
         return rois, roi_info
     
-    def forward(self, x, mode=None, return_loss=False, labels=None, return_simple=False):
+    def forward(self, x, mode=None, return_loss=False, labels=None):
         # Determine mode from model.training if not specified
         if mode is None:
             mode = 'train' if self.training else 'test'
@@ -273,8 +274,8 @@ class DetSegModel(nn.Module):
             else:
                 full_segmentation = torch.zeros_like(x)
             
-            # Simple output for multi-GPU validation
-            if return_simple:
+            # Simple output for multi-GPU validation (controlled by attribute)
+            if self.return_simple:
                 return full_segmentation  # Tensor only (DataParallel friendly)
             
             return {
@@ -426,6 +427,9 @@ def validate(model, loader, device, use_multi_gpu=False):
         # Multi-GPU validation (faster)
         model.eval()
         model_to_use = model
+        # Set return_simple flag for DataParallel compatibility
+        if hasattr(model, 'module'):
+            model.module.return_simple = True
     else:
         # Single GPU validation (stable)
         if isinstance(model, nn.DataParallel):
@@ -433,32 +437,38 @@ def validate(model, loader, device, use_multi_gpu=False):
         else:
             model_to_use = model
         model_to_use.eval()
+        model_to_use.return_simple = False
     
     dice_metric = DiceMetric(reduction='mean')
     
-    with torch.no_grad():
-        pbar = tqdm(loader, desc="[Val]", leave=False)
-        for batch in pbar:
-            images = batch['image'].to(device)
-            labels = batch['label'].to(device)
-            
-            # Inference - simple output for multi-GPU compatibility
-            if use_multi_gpu and isinstance(model, nn.DataParallel):
-                # Return tensor only (DataParallel friendly)
-                full_seg = model_to_use(images, return_simple=True)
-            else:
-                # Single GPU - can return full dict
+    try:
+        with torch.no_grad():
+            pbar = tqdm(loader, desc="[Val]", leave=False)
+            for batch in pbar:
+                images = batch['image'].to(device)
+                labels = batch['label'].to(device)
+                
+                # Inference
                 outputs = model_to_use(images)
+                
+                # Extract segmentation (handle both tensor and dict)
                 if isinstance(outputs, dict):
                     full_seg = outputs['full_segmentation']
                 else:
-                    full_seg = outputs
-            
-            # Threshold
-            full_seg_binary = (full_seg > 0.5).float()
-            
-            # Calculate Dice
-            dice_metric(y_pred=full_seg_binary, y=labels)
+                    full_seg = outputs  # Already tensor
+                
+                # Threshold
+                full_seg_binary = (full_seg > 0.5).float()
+                
+                # Calculate Dice
+                dice_metric(y_pred=full_seg_binary, y=labels)
+    finally:
+        # Reset return_simple flag
+        if isinstance(model, nn.DataParallel):
+            if hasattr(model, 'module'):
+                model.module.return_simple = False
+        else:
+            model.return_simple = False
     
     # Aggregate metric
     mean_dice = dice_metric.aggregate().item()
@@ -476,6 +486,7 @@ def test_and_save(model, loader, device, output_dir):
         model_eval = model
     
     model_eval.eval()
+    model_eval.return_simple = False  # Return full dict for RoI info
     dice_metric = DiceMetric(reduction='mean')
     
     os.makedirs(output_dir, exist_ok=True)
