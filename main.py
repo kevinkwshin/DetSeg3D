@@ -349,7 +349,7 @@ def segmentation_loss(pred_masks, gt_rois):
 # Training
 # ============================================================================
 
-def train_epoch(model, loader, optimizer, device, epoch):
+def train_epoch(model, loader, optimizer, device, epoch, scaler=None, use_fp16=False):
     model.train()
     total_loss = 0
     
@@ -360,28 +360,56 @@ def train_epoch(model, loader, optimizer, device, epoch):
         
         optimizer.zero_grad()
         
-        # Forward
-        outputs = model(images, mode='train')
-        
-        # Loss
-        det_loss = detection_loss(
-            outputs['heatmap'], 
-            outputs['size'], 
-            outputs['offset'], 
-            labels
-        )
-        
-        # Segmentation loss (simplified - 실제로는 GT RoI matching 필요)
-        seg_loss = torch.tensor(0.0).to(device)
-        if outputs['masks'] is not None:
-            # TODO: GT RoI extraction and matching
-            pass
-        
-        loss = det_loss + 2.0 * seg_loss
-        
-        # Backward
-        loss.backward()
-        optimizer.step()
+        # Mixed precision training
+        if use_fp16 and scaler is not None:
+            with torch.cuda.amp.autocast():
+                # Forward
+                outputs = model(images, mode='train')
+                
+                # Loss
+                det_loss = detection_loss(
+                    outputs['heatmap'], 
+                    outputs['size'], 
+                    outputs['offset'], 
+                    labels
+                )
+                
+                # Segmentation loss (simplified - 실제로는 GT RoI matching 필요)
+                seg_loss = torch.tensor(0.0).to(device)
+                if outputs['masks'] is not None:
+                    # TODO: GT RoI extraction and matching
+                    pass
+                
+                loss = det_loss + 2.0 * seg_loss
+            
+            # Backward with scaling
+            scaler.scale(loss).backward()
+            scaler.step(optimizer)
+            scaler.update()
+        else:
+            # Normal training
+            # Forward
+            outputs = model(images, mode='train')
+            
+            # Loss
+            det_loss = detection_loss(
+                outputs['heatmap'], 
+                outputs['size'], 
+                outputs['offset'], 
+                labels
+            )
+            
+            # Segmentation loss (simplified - 실제로는 GT RoI matching 필요)
+            seg_loss = torch.tensor(0.0).to(device)
+            if outputs['masks'] is not None:
+                # TODO: GT RoI extraction and matching
+                pass
+            
+            loss = det_loss + 2.0 * seg_loss
+            
+            # Backward
+            loss.backward()
+            optimizer.step()
         
         total_loss += loss.item()
         
@@ -494,6 +522,8 @@ def main():
     parser.add_argument('--roi_size', type=int, default=32)
     parser.add_argument('--val_split', type=float, default=0.2, help='검증 데이터 비율')
     parser.add_argument('--device', type=str, default='cuda' if torch.cuda.is_available() else 'cpu')
+    parser.add_argument('--fp16', action='store_true', help='Mixed precision training (fp16)')
+    parser.add_argument('--multi_gpu', action='store_true', help='Use all available GPUs')
     args = parser.parse_args()
     
     # Create output directory
@@ -546,8 +576,24 @@ def main():
         
         # Model
         model = DetSegModel(roi_size=args.roi_size).to(args.device)
+        
+        # Multi-GPU
+        if args.multi_gpu and torch.cuda.device_count() > 1:
+            print(f"Using {torch.cuda.device_count()} GPUs with DataParallel")
+            model = nn.DataParallel(model)
+        
         optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr)
         scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=args.epochs)
+        
+        # Mixed Precision
+        scaler = None
+        if args.fp16:
+            if args.device == 'cuda':
+                scaler = torch.cuda.amp.GradScaler()
+                print("Using mixed precision training (fp16)")
+            else:
+                print("Warning: fp16 only works with CUDA. Ignoring --fp16 flag.")
+                args.fp16 = False
         
         # Training loop
         best_val = 0.0
@@ -556,7 +602,7 @@ def main():
         print(f"{'='*70}\n")
         
         for epoch in range(args.epochs):
-            train_loss = train_epoch(model, train_loader, optimizer, args.device, epoch)
+            train_loss = train_epoch(model, train_loader, optimizer, args.device, epoch, scaler, args.fp16)
             val_score = validate(model, val_loader, args.device)
             scheduler.step()
             
@@ -565,7 +611,9 @@ def main():
             # Save checkpoint
             if val_score > best_val:
                 best_val = val_score
-                torch.save(model.state_dict(), os.path.join(args.output_dir, 'best_model.pth'))
+                # Save model (handle DataParallel)
+                model_to_save = model.module if hasattr(model, 'module') else model
+                torch.save(model_to_save.state_dict(), os.path.join(args.output_dir, 'best_model.pth'))
                 print(f" | ★ Best!")
             else:
                 print()

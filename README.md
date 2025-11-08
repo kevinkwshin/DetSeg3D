@@ -105,6 +105,30 @@ L_total = L_det + λ × L_seg
 ✅ **전체 맥락 보존** - Patch 방식과 달리 global detection  
 ✅ **해석 가능** - RoI + confidence + mask 출력
 
+## 성능 최적화
+
+### Mixed Precision (fp16)
+- **메모리 사용량 30-50% 감소** → 더 큰 배치 크기 가능
+- **학습 속도 2-3배 향상** (RTX 30xx, A100 등 Tensor Core 지원 GPU)
+- 정확도 손실 거의 없음
+
+### Multi-GPU
+- DataParallel로 모든 가용 GPU 자동 활용
+- 배치를 GPU들에 분산하여 처리
+- 예: 2 GPU → 배치 크기 2배 증가 가능
+
+**권장 설정:**
+```bash
+# 단일 GPU (16GB)
+python main.py --mode train --batch_size 2
+
+# 단일 GPU (16GB) + fp16
+python main.py --mode train --batch_size 4 --fp16
+
+# 4x GPU (16GB each) + fp16
+python main.py --mode train --batch_size 16 --fp16 --multi_gpu
+```
+
 ---
 
 ## 프로젝트 구조
@@ -138,8 +162,23 @@ python main.py --mode train \
     --val_split 0.2
 ```
 
+**고급 옵션 (성능 향상):**
+
+```bash
+# Mixed precision (fp16) + Multi-GPU 사용
+python main.py --mode train \
+    --image_dir /path/to/train/images \
+    --label_dir /path/to/train/labels \
+    --epochs 100 \
+    --batch_size 4 \
+    --fp16 \
+    --multi_gpu
+```
+
 - 이미지/레이블 폴더를 지정하면 자동으로 80/20 train/val split
 - `.nii`, `.nii.gz`, `.npy` 형식 지원
+- `--fp16`: Mixed precision training (메모리 절약 + 속도 향상)
+- `--multi_gpu`: 모든 가용 GPU 사용 (DataParallel)
 
 ### 테스트
 
@@ -278,4 +317,6 @@ python visualize.py \
 | `--lr` | 1e-4 | Learning rate |
 | `--roi_size` | 32 | RoI 크기 (32³) |
 | `--val_split` | 0.2 | 검증 데이터 비율 |
+| `--fp16` | False | Mixed precision (fp16) 사용 |
+| `--multi_gpu` | False | 모든 가용 GPU 사용 |
 | `--det_threshold` | 0.3 (train) / 0.1 (test) | Detection threshold |
