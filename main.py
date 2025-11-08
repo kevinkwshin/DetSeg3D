@@ -193,8 +193,8 @@ def reconstruct_segmentation_from_rois(roi_masks, roi_info, original_shape):
     RoI segmentation 결과를 원본 이미지 크기로 재구성
     
     Args:
-        roi_masks: (N_rois, 1, roi_size, roi_size, roi_size) - RoI segmentation masks
-        roi_info: List of dicts with 'bbox', 'size' info
+        roi_masks: List of (1, 1, D, H, W) - RoI segmentation masks (variable sizes)
+        roi_info: List of dicts with 'bbox', 'roi_shape' info
         original_shape: (D, H, W) - 원본 볼륨 크기
     
     Returns:
@@ -204,21 +204,23 @@ def reconstruct_segmentation_from_rois(roi_masks, roi_info, original_shape):
         return torch.zeros(1, 1, *original_shape)
     
     D, H, W = original_shape
-    device = roi_masks.device
+    # Get device from first mask
+    device = roi_masks[0].device if isinstance(roi_masks, list) else roi_masks.device
     
     # 전체 segmentation map 초기화
     full_seg = torch.zeros(1, 1, D, H, W, device=device)
     count_map = torch.zeros(1, 1, D, H, W, device=device)  # 겹침 처리용
     
     for i, info in enumerate(roi_info):
-        # RoI mask를 원래 크기로 resize
-        roi_mask = roi_masks[i:i+1]  # (1, 1, roi_size, roi_size, roi_size)
+        # Get RoI mask (already in appropriate size from adaptive resize)
+        roi_mask = roi_masks[i] if isinstance(roi_masks, list) else roi_masks[i:i+1]
         
         # 원래 bbox 크기로 복원
         d_start, h_start, w_start, d_end, h_end, w_end = info['bbox']
         original_size = (d_end - d_start, h_end - h_start, w_end - w_start)
         
         # Resize to original bbox size
+        # (roi_mask may already be close to original size if it was a small lesion)
         resized_mask = F.interpolate(
             roi_mask, 
             size=original_size,
@@ -244,7 +246,8 @@ def reconstruct_segmentation_from_rois(roi_masks, roi_info, original_shape):
 class DetSegModel(nn.Module):
     """Two-Stage Detection + Segmentation"""
     
-    def __init__(self, roi_size=32, det_threshold=0.3, max_rois=64, val_threshold=0.1, roi_batch_size=8):
+    def __init__(self, roi_size=32, det_threshold=0.3, max_rois=64, val_threshold=0.1, roi_batch_size=8,
+                 small_roi_threshold=64, max_roi_size=128):
         super().__init__()
         self.detection_net = DetectionNetwork()
         self.segmentation_net = SegmentationNetwork(roi_size=roi_size)
@@ -253,6 +256,8 @@ class DetSegModel(nn.Module):
         self.max_rois = max_rois  # Maximum RoIs per image
         self.val_threshold = val_threshold  # Validation/test threshold
         self.roi_batch_size = roi_batch_size  # Mini-batch size for RoI processing
+        self.small_roi_threshold = small_roi_threshold  # Keep original size if smaller
+        self.max_roi_size = max_roi_size  # Max size for large ROIs
         self.return_simple = False  # For multi-GPU validation
         
     def extract_rois_from_heatmap(self, volume, heatmap, size, offset, threshold=0.3, max_rois=100):
@@ -317,28 +322,95 @@ class DetSegModel(nn.Module):
                 
                 roi_crop = volume[b:b+1, :, d_start:d_end, h_start:h_end, w_start:w_end]
                 
-                # Resize to fixed size
-                roi_crop = F.interpolate(roi_crop, size=(self.roi_size, self.roi_size, self.roi_size),
-                                        mode='trilinear', align_corners=False)
+                # Get original ROI size
+                orig_d, orig_h, orig_w = roi_crop.shape[2:]
+                
+                # Adaptive resize: keep small ROIs original, resize large ones
+                max_dim = max(orig_d, orig_h, orig_w)
+                
+                if max_dim < self.small_roi_threshold:
+                    # Small ROI: keep original size! (preserve details for small lesions)
+                    resized_roi = roi_crop
+                    final_size = (orig_d, orig_h, orig_w)
+                elif max_dim > self.max_roi_size:
+                    # Large ROI: resize with aspect ratio preservation
+                    scale = self.max_roi_size / max_dim
+                    new_d = max(1, int(orig_d * scale))
+                    new_h = max(1, int(orig_h * scale))
+                    new_w = max(1, int(orig_w * scale))
+                    resized_roi = F.interpolate(roi_crop, size=(new_d, new_h, new_w),
+                                                mode='trilinear', align_corners=False)
+                    final_size = (new_d, new_h, new_w)
+                else:
+                    # Medium ROI: keep original
+                    resized_roi = roi_crop
+                    final_size = (orig_d, orig_h, orig_w)
                 
                 # Convert MetaTensor to regular tensor to avoid metadata conflicts
-                if hasattr(roi_crop, 'as_tensor'):
-                    roi_crop = roi_crop.as_tensor()
+                if hasattr(resized_roi, 'as_tensor'):
+                    resized_roi = resized_roi.as_tensor()
                 
-                rois.append(roi_crop)
+                rois.append(resized_roi)
                 roi_info.append({
                     'batch': b,
                     'center': center,
                     'size': sz,
                     'confidence': float(hm[d, h, w]),
-                    'bbox': (d_start, h_start, w_start, d_end, h_end, w_end)
+                    'bbox': (d_start, h_start, w_start, d_end, h_end, w_end),
+                    'roi_shape': final_size  # Store resized shape
                 })
         
         if len(rois) == 0:
             return None, []
         
-        rois = torch.cat(rois, dim=0)  # (N, 1, roi_size, roi_size, roi_size)
+        # ROIs now have variable sizes, return as list
+        # (can't use torch.cat with different sizes)
         return rois, roi_info
+    
+    def process_variable_size_rois(self, rois):
+        """
+        Process ROIs with variable sizes by grouping same-size ones together
+        
+        Args:
+            rois: List of (1, 1, D, H, W) tensors with potentially different sizes
+        
+        Returns:
+            masks: List of (1, 1, D, H, W) masks in same order as input
+        """
+        if not rois:
+            return []
+        
+        # Group ROIs by shape
+        shape_groups = {}
+        for idx, roi in enumerate(rois):
+            shape = roi.shape[2:]  # (D, H, W)
+            if shape not in shape_groups:
+                shape_groups[shape] = []
+            shape_groups[shape].append((idx, roi))
+        
+        # Process each group and collect results
+        all_masks = [None] * len(rois)
+        
+        for shape, group in shape_groups.items():
+            indices, roi_tensors = zip(*group)
+            
+            # Stack same-size ROIs into batch
+            batch_rois = torch.cat(roi_tensors, dim=0)  # (N, 1, D, H, W)
+            
+            # Process in mini-batches if too large
+            batch_masks_list = []
+            for i in range(0, batch_rois.shape[0], self.roi_batch_size):
+                mini_batch = batch_rois[i:i+self.roi_batch_size]
+                mini_masks = self.segmentation_net(mini_batch)
+                batch_masks_list.append(mini_masks)
+            
+            batch_masks = torch.cat(batch_masks_list, dim=0)
+            
+            # Distribute masks back to original positions
+            for i, idx in enumerate(indices):
+                all_masks[idx] = batch_masks[i:i+1]  # Keep as (1, 1, D, H, W)
+        
+        return all_masks
     
     def forward(self, x, mode=None, return_loss=False, labels=None):
         # Determine mode from model.training if not specified
@@ -366,20 +438,8 @@ class DetSegModel(nn.Module):
             )
             
             if rois is not None:
-                # Convert MetaTensor to regular Tensor to avoid metadata issues during slicing
-                if hasattr(rois, 'as_tensor'):
-                    rois = rois.as_tensor()
-                
-                # Process RoIs in mini-batches for training too
-                roi_masks_list = []
-                num_rois = rois.shape[0]
-                
-                for i in range(0, num_rois, self.roi_batch_size):
-                    batch_rois = rois[i:i+self.roi_batch_size]
-                    batch_masks = self.segmentation_net(batch_rois)
-                    roi_masks_list.append(batch_masks)
-                
-                masks = torch.cat(roi_masks_list, dim=0) if roi_masks_list else None
+                # Process variable-size ROIs (grouped by size for efficient batch processing)
+                masks = self.process_variable_size_rois(rois)
             else:
                 masks = None
             
@@ -398,20 +458,8 @@ class DetSegModel(nn.Module):
             )
             
             if rois is not None:
-                # Convert MetaTensor to regular Tensor to avoid metadata issues during slicing
-                if hasattr(rois, 'as_tensor'):
-                    rois = rois.as_tensor()
-                
-                # Process RoIs in mini-batches to avoid OOM
-                roi_masks_list = []
-                num_rois = rois.shape[0]
-                
-                for i in range(0, num_rois, self.roi_batch_size):
-                    batch_rois = rois[i:i+self.roi_batch_size]
-                    batch_masks = self.segmentation_net(batch_rois)
-                    roi_masks_list.append(batch_masks)
-                
-                roi_masks = torch.cat(roi_masks_list, dim=0)
+                # Process variable-size ROIs (grouped by size for efficient batch processing)
+                roi_masks = self.process_variable_size_rois(rois)
                 
                 # RoI 결과를 원본 크기로 재구성
                 original_shape = x.shape[2:]  # (D, H, W)
@@ -714,6 +762,8 @@ def main():
     parser.add_argument('--val_threshold', type=float, default=0.1, help='Detection threshold for validation/test')
     parser.add_argument('--roi_batch_size', type=int, default=8, help='Mini-batch size for RoI segmentation')
     parser.add_argument('--val_interval', type=int, default=1, help='Validation interval (epochs)')
+    parser.add_argument('--small_roi_threshold', type=int, default=64, help='Keep ROIs smaller than this threshold at original size')
+    parser.add_argument('--max_roi_size', type=int, default=128, help='Maximum ROI size (resize larger ROIs)')
     args = parser.parse_args()
     
     # Set validation batch size
@@ -795,11 +845,14 @@ def main():
             det_threshold=0.3,
             max_rois=args.max_rois,
             val_threshold=args.val_threshold,
-            roi_batch_size=args.roi_batch_size
+            roi_batch_size=args.roi_batch_size,
+            small_roi_threshold=args.small_roi_threshold,
+            max_roi_size=args.max_roi_size
         ).to(args.device)
         
         print(f"\nModel configuration:")
-        print(f"  - RoI size: {args.roi_size}³")
+        print(f"  - RoI size (legacy): {args.roi_size}³")
+        print(f"  - Adaptive ROI: small <{args.small_roi_threshold} (original), large >{args.max_roi_size} (resized)")
         print(f"  - Max RoIs per image: {args.max_rois}")
         print(f"  - Val/Test threshold: {args.val_threshold}")
         print(f"  - RoI mini-batch size: {args.roi_batch_size}")
@@ -890,7 +943,9 @@ def main():
             det_threshold=0.3,
             max_rois=args.max_rois,
             val_threshold=args.val_threshold,
-            roi_batch_size=args.roi_batch_size
+            roi_batch_size=args.roi_batch_size,
+            small_roi_threshold=args.small_roi_threshold,
+            max_roi_size=args.max_roi_size
         ).to(args.device)
         model.load_state_dict(torch.load(os.path.join(args.output_dir, 'best_model.pth')))
         

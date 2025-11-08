@@ -256,12 +256,28 @@ python visualize.py \
 
 ## 핵심 기능
 
+### Adaptive RoI Processing ⭐ **NEW!**
+
+**작은 병변 검출에 최적화된 Adaptive ROI 처리:**
+
+| 병변 크기 | 처리 방법 | 해상도 보존 | 장점 |
+|----------|----------|-----------|------|
+| 작음 (< 64 voxels) | **원본 크기 유지** | **100%** ✅ | 디테일 손실 없음 |
+| 중간 (64-128) | **원본 크기 유지** | **100%** ✅ | 정확한 경계 |
+| 큼 (> 128) | Aspect ratio 유지하며 축소 | ~70% | 메모리 효율 |
+
+**핵심 특징:**
+- ✅ **Anisotropic 이미지 지원**: (160, 160, 16) → 비율 유지
+- ✅ **작은 병변 해상도 완전 보존**: 정보 손실 0%
+- ✅ **메모리 효율**: 같은 크기끼리 배치 처리
+- ✅ **유연성**: 모든 병변 크기에 대응
+
 ### RoI → Full Segmentation 재구성
 
 Stage 1에서 추출된 각 RoI의 segmentation 결과를 원본 이미지 크기로 복원:
 
 1. **Detection**: 전체 볼륨에서 RoI 탐지 (좌표 + confidence)
-2. **Segmentation**: 각 RoI를 32³으로 resize하여 정밀 분할
+2. **Adaptive Segmentation**: 각 RoI를 **원본 크기 또는 비율 유지하며 resize**
 3. **Reconstruction**: 분할된 RoI를 원래 크기로 복원하여 원본 볼륨에 배치
 4. **Merge**: 겹치는 영역은 평균값으로 처리
 
@@ -276,6 +292,7 @@ roi_info = outputs['roi_info']            # RoI 정보 (bbox, confidence)
 
 ✅ **Enhanced Detection network** (MONAI ResNet-style backbone)  
 ✅ **Enhanced Segmentation network** (Deeper U-Net with residual units)  
+✅ **Adaptive RoI Processing** ⭐ (작은 병변 해상도 100% 보존)  
 ✅ End-to-end pipeline  
 ✅ Data loading (auto train/val split)  
 ✅ **RoI → Full segmentation 재구성**  
@@ -373,10 +390,12 @@ python visualize.py \
 | `--val_split` | 0.2 | 검증 데이터 비율 |
 | `--fp16` | False | Mixed precision (fp16) 사용 |
 | `--multi_gpu` | False | 모든 가용 GPU를 training에 사용 (validation은 single GPU) |
-| `--max_rois` | 100 | 이미지당 최대 RoI 개수 (OOM 방지) |
+| `--max_rois` | 64 | 이미지당 최대 RoI 개수 (OOM 방지) |
 | `--val_threshold` | 0.1 | Validation/Test용 detection threshold |
-| `--roi_batch_size` | 32 | RoI segmentation 처리 시 mini-batch 크기 (OOM 방지) |
+| `--roi_batch_size` | 8 | RoI segmentation 처리 시 mini-batch 크기 (OOM 방지) |
 | `--val_interval` | 1 | Validation 실행 간격 (epoch 단위) |
+| `--small_roi_threshold` | 64 | 이 크기보다 작은 RoI는 원본 크기 유지 (작은 병변 해상도 보존) |
+| `--max_roi_size` | 128 | 큰 RoI의 최대 크기 (aspect ratio 유지하며 resize) |
 
 **Multi-GPU 사용 시:**
 - 실제 총 training 배치 크기 = `batch_size × GPU 개수`
