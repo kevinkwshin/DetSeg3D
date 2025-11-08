@@ -20,37 +20,44 @@ Stage 2: Segmentation Network (per RoI)
 
 ## Architecture
 
-### Stage 1: Detection Network
+### Stage 1: Detection Network (Enhanced)
 
 **입력:** 원본 3D volume (no patches)  
 **출력:** RoI coordinates + confidence scores
 
 **구조:**
-- Lightweight 3D CNN backbone
-- FPN for multi-scale features
+- **MONAI ResNet-style backbone** with residual connections
+- Multi-scale feature extraction (3 levels)
+- Feature fusion layer
 - Anchor-free detection heads
   - Center heatmap
   - Bounding box size
   - Center offset
 
 **특징:**
-- 메모리 효율적 (~2GB)
+- 강력한 feature extraction (ResidualUnit × 6)
+- Multi-scale feature aggregation
 - High recall을 위한 low threshold (0.1)
 - 3D NMS로 중복 제거
+- Parameters: ~2.5M (적절한 균형)
 
-### Stage 2: Segmentation Network
+### Stage 2: Segmentation Network (Enhanced)
 
 **입력:** 각 RoI crop (예: 32³ resize)  
 **출력:** Binary mask per RoI
 
 **구조:**
-- Lightweight 3D U-Net (~2M params)
-- Optional: context attention layer
+- **Enhanced 3D U-Net** with deeper architecture
+- 4-level encoder-decoder (32 → 64 → 128 → 256)
+- Residual units at each level (2 units)
+- Dropout (0.1) for regularization
 
 **특징:**
 - 각 RoI 독립적으로 처리 → 크기 무관 동등 가중치
+- 더 강력한 feature extraction
 - Parallel processing 가능
 - 작은 병변 확대 효과
+- Parameters: ~5M (정밀한 분할)
 
 ---
 
@@ -91,6 +98,7 @@ L_total = L_det + λ × L_seg
 
 ### 학습 팁
 
+- **HU windowing**: [0, 120] → [0, 1] (뇌출혈 최적화)
 - Detection threshold: train 0.3, inference 0.1
 - RoI sampling: positive + hard negative
 - Data augmentation: flip, rotate, scale
@@ -100,10 +108,13 @@ L_total = L_det + λ × L_seg
 
 ## 핵심 장점
 
+✅ **강력한 Feature Extraction** - MONAI ResNet-style backbone with residual connections  
 ✅ **작은 병변에 강함** - RoI별 독립 loss로 크기 편향 제거  
 ✅ **메모리 효율적** - 전체 volume dense segmentation 불필요  
 ✅ **전체 맥락 보존** - Patch 방식과 달리 global detection  
-✅ **해석 가능** - RoI + confidence + mask 출력
+✅ **정밀한 분할** - Enhanced U-Net (4-level + residual units)  
+✅ **해석 가능** - RoI + confidence + mask 출력  
+✅ **고속 학습** - Multi-GPU + fp16 지원
 
 ## 성능 최적화
 
@@ -204,6 +215,7 @@ python main.py --mode train \
 **기타 옵션:**
 - 이미지/레이블 폴더를 지정하면 자동으로 80/20 train/val split
 - `.nii`, `.nii.gz`, `.npy` 형식 지원
+- **자동 HU windowing**: 입력 이미지를 [0, 120] HU로 클리핑 후 [0, 1]로 정규화
 - `--fp16`: Mixed precision training (메모리 절약 + 속도 향상)
 - `--multi_gpu`: 모든 가용 GPU 자동 사용 (train & validation)
 
@@ -260,13 +272,15 @@ roi_info = outputs['roi_info']            # RoI 정보 (bbox, confidence)
 
 ## 구현 상태
 
-✅ Detection network (lightweight FPN)  
-✅ Segmentation network (lightweight U-Net)  
+✅ **Enhanced Detection network** (MONAI ResNet-style backbone)  
+✅ **Enhanced Segmentation network** (Deeper U-Net with residual units)  
 ✅ End-to-end pipeline  
 ✅ Data loading (auto train/val split)  
 ✅ **RoI → Full segmentation 재구성**  
 ✅ **Evaluation metrics (Dice score)**  
 ✅ **결과 저장 및 시각화**  
+✅ **Multi-GPU support** (DataParallel)  
+✅ **Mixed precision training** (fp16)  
 ⚠️ GT RoI extraction for training (simplified - 개선 필요)
 
 ---

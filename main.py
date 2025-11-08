@@ -17,43 +17,123 @@ import torch.nn.functional as F
 from torch.utils.data import Dataset, DataLoader
 
 import monai
-from monai.networks.nets import UNet
-from monai.networks.blocks import Convolution
+from monai.networks.nets import UNet, SegResNet
+from monai.networks.blocks import Convolution, ResidualUnit
 from monai.losses import DiceLoss, FocalLoss
 from monai.transforms import (
     Compose, LoadImaged, EnsureChannelFirstd, Spacingd,
-    ScaleIntensityd, RandFlipd, RandRotate90d, EnsureTyped
+    ScaleIntensityd, ScaleIntensityRanged, RandFlipd, RandRotate90d, EnsureTyped
 )
 from monai.data import decollate_batch, MetaTensor, pad_list_data_collate
 from monai.metrics import DiceMetric
 import nibabel as nib
 
 # ============================================================================
-# Stage 1: Detection Network (Lightweight)
+# Stage 1: Detection Network (MONAI-based, Enhanced)
 # ============================================================================
 
 class DetectionNetwork(nn.Module):
-    """3D Detection Network - RoI + Confidence"""
+    """
+    3D Detection Network with MONAI ResNet backbone
+    More powerful feature extraction for better detection
+    """
     
     def __init__(self, in_channels=1, base_channels=32):
         super().__init__()
         
-        # Lightweight backbone with FPN
-        self.encoder = nn.ModuleList([
-            Convolution(3, in_channels, base_channels, strides=2, norm='batch', act='relu'),      # /2
-            Convolution(3, base_channels, base_channels*2, strides=2, norm='batch', act='relu'),  # /4
-            Convolution(3, base_channels*2, base_channels*4, strides=2, norm='batch', act='relu'), # /8
-        ])
+        # Enhanced backbone: ResNet-style with residual connections
+        self.init_conv = Convolution(
+            spatial_dims=3,
+            in_channels=in_channels,
+            out_channels=base_channels,
+            kernel_size=3,
+            strides=1,
+            norm='batch',
+            act='relu'
+        )
+        
+        # Multi-scale encoder with residual blocks
+        self.encoder1 = nn.Sequential(
+            ResidualUnit(
+                spatial_dims=3,
+                in_channels=base_channels,
+                out_channels=base_channels,
+                strides=1,
+                kernel_size=3,
+                subunits=2,
+                act='relu',
+                norm='batch'
+            ),
+            Convolution(3, base_channels, base_channels*2, strides=2, norm='batch', act='relu')  # /2
+        )
+        
+        self.encoder2 = nn.Sequential(
+            ResidualUnit(
+                spatial_dims=3,
+                in_channels=base_channels*2,
+                out_channels=base_channels*2,
+                strides=1,
+                kernel_size=3,
+                subunits=2,
+                act='relu',
+                norm='batch'
+            ),
+            Convolution(3, base_channels*2, base_channels*4, strides=2, norm='batch', act='relu')  # /4
+        )
+        
+        self.encoder3 = nn.Sequential(
+            ResidualUnit(
+                spatial_dims=3,
+                in_channels=base_channels*4,
+                out_channels=base_channels*4,
+                strides=1,
+                kernel_size=3,
+                subunits=2,
+                act='relu',
+                norm='batch'
+            ),
+            Convolution(3, base_channels*4, base_channels*8, strides=2, norm='batch', act='relu')  # /8
+        )
+        
+        # Feature fusion layer
+        self.feature_fusion = nn.Sequential(
+            ResidualUnit(
+                spatial_dims=3,
+                in_channels=base_channels*8,
+                out_channels=base_channels*8,
+                strides=1,
+                kernel_size=3,
+                subunits=2,
+                act='relu',
+                norm='batch'
+            )
+        )
         
         # Detection heads (anchor-free)
-        self.heatmap_head = nn.Conv3d(base_channels*4, 1, kernel_size=1)  # center heatmap
-        self.size_head = nn.Conv3d(base_channels*4, 3, kernel_size=1)     # bbox size (d,h,w)
-        self.offset_head = nn.Conv3d(base_channels*4, 3, kernel_size=1)   # center offset
+        self.heatmap_head = nn.Sequential(
+            Convolution(3, base_channels*8, base_channels*4, kernel_size=3, norm='batch', act='relu'),
+            nn.Conv3d(base_channels*4, 1, kernel_size=1)
+        )
+        
+        self.size_head = nn.Sequential(
+            Convolution(3, base_channels*8, base_channels*4, kernel_size=3, norm='batch', act='relu'),
+            nn.Conv3d(base_channels*4, 3, kernel_size=1)
+        )
+        
+        self.offset_head = nn.Sequential(
+            Convolution(3, base_channels*8, base_channels*4, kernel_size=3, norm='batch', act='relu'),
+            nn.Conv3d(base_channels*4, 3, kernel_size=1)
+        )
         
     def forward(self, x):
-        # Encode
-        for layer in self.encoder:
-            x = layer(x)
+        # Multi-scale feature extraction
+        x = self.init_conv(x)
+        x = self.encoder1(x)  # /2
+        x = self.encoder2(x)  # /4
+        x = self.encoder3(x)  # /8
+        
+        # Feature fusion
+        x = self.feature_fusion(x)
         
         # Detection outputs
         heatmap = torch.sigmoid(self.heatmap_head(x))
@@ -64,24 +144,30 @@ class DetectionNetwork(nn.Module):
 
 
 # ============================================================================
-# Stage 2: Segmentation Network (Lightweight U-Net)
+# Stage 2: Segmentation Network (Enhanced U-Net)
 # ============================================================================
 
 class SegmentationNetwork(nn.Module):
-    """3D Segmentation Network for RoI"""
+    """
+    Enhanced 3D Segmentation Network for RoI
+    More powerful with deeper U-Net and residual connections
+    """
     
     def __init__(self, roi_size=32):
         super().__init__()
         self.roi_size = roi_size
         
-        # Lightweight 3D U-Net
+        # Enhanced 3D U-Net with more depth and residual units
         self.unet = UNet(
             spatial_dims=3,
             in_channels=1,
             out_channels=1,
-            channels=(16, 32, 64),
-            strides=(2, 2),
-            num_res_units=1,
+            channels=(32, 64, 128, 256),  # Deeper network
+            strides=(2, 2, 2),
+            num_res_units=2,  # More residual units per level
+            norm='batch',
+            act='relu',
+            dropout=0.1,
         )
         
     def forward(self, roi_crops):
@@ -378,13 +464,6 @@ def train_epoch(model, loader, optimizer, device, epoch, scaler=None, use_fp16=F
         images = batch['image'].to(device)
         labels = batch['label'].to(device)
         
-        # Debug: print input size on first batch
-        if batch_idx == 0:
-            print(f"\n[DEBUG] Input shape: {images.shape}")
-            print(f"[DEBUG] Label shape: {labels.shape}")
-            print(f"[DEBUG] Image dtype: {images.dtype}")
-            print(f"[DEBUG] Memory allocated: {torch.cuda.memory_allocated(device)/1024**2:.1f} MB")
-        
         optimizer.zero_grad()
         
         # Mixed precision training
@@ -583,7 +662,15 @@ def main():
     train_transforms = Compose([
         LoadImaged(keys=['image', 'label'], image_only=False),
         EnsureChannelFirstd(keys=['image', 'label']),
-        ScaleIntensityd(keys=['image']),
+        # HU windowing: clip to [0, 120] and scale to [0, 1]
+        ScaleIntensityRanged(
+            keys=['image'],
+            a_min=0,
+            a_max=120,
+            b_min=0.0,
+            b_max=1.0,
+            clip=True
+        ),
         RandFlipd(keys=['image', 'label'], prob=0.5, spatial_axis=0),
         RandRotate90d(keys=['image', 'label'], prob=0.5, spatial_axes=(0, 1)),
         EnsureTyped(keys=['image', 'label']),
@@ -592,7 +679,15 @@ def main():
     val_transforms = Compose([
         LoadImaged(keys=['image', 'label'], image_only=False),
         EnsureChannelFirstd(keys=['image', 'label']),
-        ScaleIntensityd(keys=['image']),
+        # HU windowing: clip to [0, 120] and scale to [0, 1]
+        ScaleIntensityRanged(
+            keys=['image'],
+            a_min=0,
+            a_max=120,
+            b_min=0.0,
+            b_max=1.0,
+            clip=True
+        ),
         EnsureTyped(keys=['image', 'label']),
     ])
     

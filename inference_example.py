@@ -41,8 +41,9 @@ def inference_single_image(model, image_path, device='cuda'):
     if image_tensor.ndim == 3:
         image_tensor = image_tensor.unsqueeze(0).unsqueeze(0)  # (1, 1, D, H, W)
     
-    # Normalize
-    image_tensor = (image_tensor - image_tensor.min()) / (image_tensor.max() - image_tensor.min() + 1e-8)
+    # HU windowing: clip to [0, 120] and scale to [0, 1]
+    image_tensor = torch.clamp(image_tensor, min=0, max=120)
+    image_tensor = (image_tensor - 0) / (120 - 0)  # Scale to [0, 1]
     image_tensor = image_tensor.to(device)
     
     # Inference
