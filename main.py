@@ -670,14 +670,14 @@ def generate_centerdet_targets(batch_bboxes, output_shape, stride=8):
             gt_heatmap[b, 0] = torch.max(gt_heatmap[b, 0], gaussian_tensor)
             
             # 2. Size target (at center point)
-            gt_size[b, 0, ct_int_d, ct_int_h, ct_int_w] = size[0] / stride
-            gt_size[b, 1, ct_int_d, ct_int_h, ct_int_w] = size[1] / stride
-            gt_size[b, 2, ct_int_d, ct_int_h, ct_int_w] = size[2] / stride
+            gt_size[b, 0, ct_int_d, ct_int_h, ct_int_w] = float(size[0] / stride)
+            gt_size[b, 1, ct_int_d, ct_int_h, ct_int_w] = float(size[1] / stride)
+            gt_size[b, 2, ct_int_d, ct_int_h, ct_int_w] = float(size[2] / stride)
             
             # 3. Offset target (sub-pixel refinement)
-            gt_offset[b, 0, ct_int_d, ct_int_h, ct_int_w] = center_d - ct_int_d
-            gt_offset[b, 1, ct_int_d, ct_int_h, ct_int_w] = center_h - ct_int_h
-            gt_offset[b, 2, ct_int_d, ct_int_h, ct_int_w] = center_w - ct_int_w
+            gt_offset[b, 0, ct_int_d, ct_int_h, ct_int_w] = float(center_d - ct_int_d)
+            gt_offset[b, 1, ct_int_d, ct_int_h, ct_int_w] = float(center_h - ct_int_h)
+            gt_offset[b, 2, ct_int_d, ct_int_h, ct_int_w] = float(center_w - ct_int_w)
     
     return gt_heatmap, gt_size, gt_offset
 
