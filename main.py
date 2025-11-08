@@ -23,9 +23,8 @@ from monai.transforms import (
     Compose, LoadImaged, EnsureChannelFirstd, Spacingd,
     ScaleIntensityd, RandFlipd, RandRotate90d, EnsureTyped
 )
-from monai.data import decollate_batch, MetaTensor
+from monai.data import decollate_batch, MetaTensor, pad_list_data_collate
 from monai.metrics import DiceMetric
-from monai.data.utils import list_data_collate
 import nibabel as nib
 
 # ============================================================================
@@ -528,14 +527,14 @@ def main():
             batch_size=args.batch_size, 
             shuffle=True, 
             num_workers=4,
-            collate_fn=list_data_collate
+            collate_fn=pad_list_data_collate
         )
         val_loader = DataLoader(
             val_dataset, 
             batch_size=1, 
             shuffle=False, 
             num_workers=2,
-            collate_fn=list_data_collate
+            collate_fn=pad_list_data_collate
         )
         
         print(f"Train: {len(train_dataset)}, Val: {len(val_dataset)}")
@@ -571,7 +570,7 @@ def main():
             batch_size=1, 
             shuffle=False, 
             num_workers=2,
-            collate_fn=list_data_collate
+            collate_fn=pad_list_data_collate
         )
         
         # Load model
