@@ -244,17 +244,33 @@ def reconstruct_segmentation_from_rois(roi_masks, roi_info, original_shape):
 class DetSegModel(nn.Module):
     """Two-Stage Detection + Segmentation"""
     
-    def __init__(self, roi_size=32, det_threshold=0.3):
+    def __init__(self, roi_size=32, det_threshold=0.3, max_rois=100, val_threshold=0.1, roi_batch_size=32):
         super().__init__()
         self.detection_net = DetectionNetwork()
         self.segmentation_net = SegmentationNetwork(roi_size=roi_size)
         self.roi_size = roi_size
-        self.det_threshold = det_threshold
+        self.det_threshold = det_threshold  # Training threshold
+        self.max_rois = max_rois  # Maximum RoIs per image
+        self.val_threshold = val_threshold  # Validation/test threshold
+        self.roi_batch_size = roi_batch_size  # Mini-batch size for RoI processing
         self.return_simple = False  # For multi-GPU validation
         
-    def extract_rois_from_heatmap(self, volume, heatmap, size, offset, threshold=0.3):
-        """Extract RoI crops from detection heatmap"""
-        # Simple peak detection (threshold 기반)
+    def extract_rois_from_heatmap(self, volume, heatmap, size, offset, threshold=0.3, max_rois=100):
+        """
+        Extract RoI crops from detection heatmap
+        
+        Args:
+            volume: Input volume (B, C, D, H, W)
+            heatmap: Detection heatmap (B, 1, D/8, H/8, W/8)
+            size: Predicted bbox sizes (B, 3, D/8, H/8, W/8)
+            offset: Predicted offsets (B, 3, D/8, H/8, W/8)
+            threshold: Confidence threshold
+            max_rois: Maximum number of RoIs per batch (for memory control)
+        
+        Returns:
+            rois: (N, 1, roi_size, roi_size, roi_size) or None
+            roi_info: List of roi metadata
+        """
         B, C, D, H, W = heatmap.shape
         
         rois = []
@@ -267,7 +283,18 @@ class DetSegModel(nn.Module):
             if len(peaks[0]) == 0:
                 continue
             
-            for i in range(len(peaks[0])):
+            # Get all peak confidences
+            confidences = hm[peaks]
+            
+            # Sort by confidence and select top-k
+            num_peaks = len(peaks[0])
+            if num_peaks > max_rois:
+                top_k_indices = np.argsort(confidences)[-max_rois:]  # Top max_rois
+            else:
+                top_k_indices = np.arange(num_peaks)
+            
+            for idx in top_k_indices:
+                i = int(idx)
                 d, h, w = peaks[0][i], peaks[1][i], peaks[2][i]
                 
                 # Get bbox size
@@ -299,7 +326,7 @@ class DetSegModel(nn.Module):
                     'batch': b,
                     'center': center,
                     'size': sz,
-                    'confidence': hm[d, h, w],
+                    'confidence': float(hm[d, h, w]),
                     'bbox': (d_start, h_start, w_start, d_end, h_end, w_end)
                 })
         
@@ -330,10 +357,21 @@ class DetSegModel(nn.Module):
             
         elif mode == 'train':
             # Training: extract RoIs and segment
-            rois, roi_info = self.extract_rois_from_heatmap(x, heatmap, size, offset, self.det_threshold)
+            rois, roi_info = self.extract_rois_from_heatmap(
+                x, heatmap, size, offset, self.det_threshold, max_rois=self.max_rois
+            )
             
             if rois is not None:
-                masks = self.segmentation_net(rois)
+                # Process RoIs in mini-batches for training too
+                roi_masks_list = []
+                num_rois = rois.shape[0]
+                
+                for i in range(0, num_rois, self.roi_batch_size):
+                    batch_rois = rois[i:i+self.roi_batch_size]
+                    batch_masks = self.segmentation_net(batch_rois)
+                    roi_masks_list.append(batch_masks)
+                
+                masks = torch.cat(roi_masks_list, dim=0) if roi_masks_list else None
             else:
                 masks = None
             
@@ -347,10 +385,21 @@ class DetSegModel(nn.Module):
             }
         else:
             # Inference: 전체 segmentation 재구성
-            rois, roi_info = self.extract_rois_from_heatmap(x, heatmap, size, offset, threshold=0.1)
+            rois, roi_info = self.extract_rois_from_heatmap(
+                x, heatmap, size, offset, threshold=self.val_threshold, max_rois=self.max_rois
+            )
             
             if rois is not None:
-                roi_masks = self.segmentation_net(rois)
+                # Process RoIs in mini-batches to avoid OOM
+                roi_masks_list = []
+                num_rois = rois.shape[0]
+                
+                for i in range(0, num_rois, self.roi_batch_size):
+                    batch_rois = rois[i:i+self.roi_batch_size]
+                    batch_masks = self.segmentation_net(batch_rois)
+                    roi_masks_list.append(batch_masks)
+                
+                roi_masks = torch.cat(roi_masks_list, dim=0)
                 
                 # RoI 결과를 원본 크기로 재구성
                 original_shape = x.shape[2:]  # (D, H, W)
@@ -649,6 +698,9 @@ def main():
     parser.add_argument('--device', type=str, default='cuda' if torch.cuda.is_available() else 'cpu')
     parser.add_argument('--fp16', action='store_true', help='Mixed precision training (fp16)')
     parser.add_argument('--multi_gpu', action='store_true', help='Use all available GPUs')
+    parser.add_argument('--max_rois', type=int, default=100, help='Maximum number of RoIs to extract per image')
+    parser.add_argument('--val_threshold', type=float, default=0.1, help='Detection threshold for validation/test')
+    parser.add_argument('--roi_batch_size', type=int, default=32, help='Mini-batch size for RoI segmentation')
     args = parser.parse_args()
     
     # Set validation batch size
@@ -725,7 +777,19 @@ def main():
         print(f"Train: {len(train_dataset)}, Val: {len(val_dataset)}")
         
         # Model
-        model = DetSegModel(roi_size=args.roi_size).to(args.device)
+        model = DetSegModel(
+            roi_size=args.roi_size,
+            det_threshold=0.3,
+            max_rois=args.max_rois,
+            val_threshold=args.val_threshold,
+            roi_batch_size=args.roi_batch_size
+        ).to(args.device)
+        
+        print(f"\nModel configuration:")
+        print(f"  - RoI size: {args.roi_size}³")
+        print(f"  - Max RoIs per image: {args.max_rois}")
+        print(f"  - Val/Test threshold: {args.val_threshold}")
+        print(f"  - RoI mini-batch size: {args.roi_batch_size}")
         
         # Multi-GPU
         if args.multi_gpu and torch.cuda.device_count() > 1:
@@ -802,7 +866,13 @@ def main():
         )
         
         # Load model
-        model = DetSegModel(roi_size=args.roi_size).to(args.device)
+        model = DetSegModel(
+            roi_size=args.roi_size,
+            det_threshold=0.3,
+            max_rois=args.max_rois,
+            val_threshold=args.val_threshold,
+            roi_batch_size=args.roi_batch_size
+        ).to(args.device)
         model.load_state_dict(torch.load(os.path.join(args.output_dir, 'best_model.pth')))
         
         print("Testing and saving predictions...")

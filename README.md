@@ -373,8 +373,39 @@ python visualize.py \
 | `--val_split` | 0.2 | 검증 데이터 비율 |
 | `--fp16` | False | Mixed precision (fp16) 사용 |
 | `--multi_gpu` | False | 모든 가용 GPU를 training에 사용 (validation은 single GPU) |
-| `--det_threshold` | 0.3 (train) / 0.1 (test) | Detection threshold |
+| `--max_rois` | 100 | 이미지당 최대 RoI 개수 (OOM 방지) |
+| `--val_threshold` | 0.1 | Validation/Test용 detection threshold |
+| `--roi_batch_size` | 32 | RoI segmentation 처리 시 mini-batch 크기 (OOM 방지) |
 
 **Multi-GPU 사용 시:**
 - 실제 총 training 배치 크기 = `batch_size × GPU 개수`
 - 예: `--batch_size 2 --multi_gpu` (4 GPU) → 총 8 samples/batch
+
+**OOM (Out of Memory) 문제 해결:**
+
+Validation에서 OOM 에러가 발생하는 경우, 다음 파라미터를 조정하세요:
+
+1. **`--max_rois`를 줄이기** (기본값: 100)
+   ```bash
+   --max_rois 50  # 이미지당 최대 50개 RoI만 처리
+   ```
+
+2. **`--val_threshold`를 높이기** (기본값: 0.1)
+   ```bash
+   --val_threshold 0.3  # Confidence가 높은 RoI만 선택
+   ```
+
+3. **`--roi_batch_size`를 줄이기** (기본값: 32)
+   ```bash
+   --roi_batch_size 16  # RoI를 16개씩 처리
+   ```
+
+**권장 조합 (메모리 부족 시):**
+```bash
+python main.py --mode train \
+    --max_rois 50 \
+    --val_threshold 0.2 \
+    --roi_batch_size 16 \
+    --batch_size 1 \
+    --fp16 --multi_gpu
+```
