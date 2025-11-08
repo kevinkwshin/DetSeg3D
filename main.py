@@ -444,15 +444,15 @@ class DetSegModel(nn.Module):
                 # Process ROIs through segmentation network
                 masks = self.process_variable_size_rois(rois)
                 
-                # Extract GT ROIs for loss computation
-                gt_rois = []
-                for info in roi_info:
+                # Compute segmentation loss per ROI (variable sizes!)
+                seg_losses = []
+                for mask, info in zip(masks, roi_info):
                     b = info['batch']
                     bbox = info['bbox']
                     d_start, h_start, w_start, d_end, h_end, w_end = bbox
                     gt_crop = labels[b:b+1, :, d_start:d_end, h_start:h_end, w_start:w_end]
                     
-                    # Resize to match predicted mask size
+                    # Resize GT to match predicted mask size
                     target_size = info['roi_shape']
                     gt_resized = F.interpolate(gt_crop, size=target_size, mode='trilinear', align_corners=False)
                     gt_resized = (gt_resized > 0.5).float()  # Binarize
@@ -460,13 +460,13 @@ class DetSegModel(nn.Module):
                     if hasattr(gt_resized, 'as_tensor'):
                         gt_resized = gt_resized.as_tensor()
                     
-                    gt_rois.append(gt_resized)
+                    # Compute loss for this ROI
+                    roi_loss = segmentation_loss(mask, gt_resized)
+                    seg_losses.append(roi_loss)
                 
-                # Compute segmentation loss
-                if len(masks) > 0 and len(gt_rois) > 0:
-                    pred_stack = torch.cat(masks, dim=0)
-                    gt_stack = torch.cat(gt_rois, dim=0)
-                    seg_loss = segmentation_loss(pred_stack, gt_stack)
+                # Average all ROI losses
+                if len(seg_losses) > 0:
+                    seg_loss = torch.stack(seg_losses).mean()
             
             total_loss = det_loss + 2.0 * seg_loss
             return total_loss
