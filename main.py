@@ -764,9 +764,9 @@ def main():
         for epoch in range(args.epochs):
             train_loss = train_epoch(model, train_loader, optimizer, args.device, epoch, scaler, args.fp16)
             
-            # Validation with multi-GPU if available
-            use_multi_gpu = args.multi_gpu and isinstance(model, nn.DataParallel)
-            val_score = validate(model, val_loader, args.device, use_multi_gpu=use_multi_gpu)
+            # Validation - use single GPU for memory stability
+            # (multi-GPU validation can cause OOM when gathering large full_segmentation tensors)
+            val_score = validate(model, val_loader, args.device, use_multi_gpu=False)
             
             # Set model back to train mode after validation
             model.train()
