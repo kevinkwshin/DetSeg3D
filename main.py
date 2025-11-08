@@ -619,7 +619,7 @@ def train_epoch(model, loader, optimizer, device, epoch, scaler=None, use_fp16=F
     return total_loss / len(loader)
 
 
-def validate(model, loader, device, use_multi_gpu=False):
+def validate(model, loader, device, use_multi_gpu=True):
     """
     Validation with optional multi-GPU support
     
@@ -768,7 +768,7 @@ def main():
     parser.add_argument('--fp16', action='store_true', help='Mixed precision training (fp16)')
     parser.add_argument('--multi_gpu', action='store_true', help='Use all available GPUs')
     parser.add_argument('--max_rois', type=int, default=64, help='Maximum number of RoIs to extract per image')
-    parser.add_argument('--val_threshold', type=float, default=0.1, help='Detection threshold for validation/test')
+    parser.add_argument('--val_threshold', type=float, default=0.3, help='Detection threshold for validation/test')
     parser.add_argument('--roi_batch_size', type=int, default=8, help='Mini-batch size for RoI segmentation')
     parser.add_argument('--val_interval', type=int, default=1, help='Validation interval (epochs)')
     parser.add_argument('--small_roi_threshold', type=int, default=64, help='Keep ROIs smaller than this threshold at original size')
