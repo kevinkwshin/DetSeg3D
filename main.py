@@ -173,7 +173,7 @@ class DetSegModel(nn.Module):
         roi_info = []
         
         for b in range(B):
-            hm = heatmap[b, 0].cpu().numpy()
+            hm = heatmap[b, 0].detach().cpu().numpy()
             peaks = np.where(hm > threshold)
             
             if len(peaks[0]) == 0:
@@ -183,12 +183,12 @@ class DetSegModel(nn.Module):
                 d, h, w = peaks[0][i], peaks[1][i], peaks[2][i]
                 
                 # Get bbox size
-                sz = size[b, :, d, h, w].cpu().numpy() * 8  # scale back (stride=8)
+                sz = size[b, :, d, h, w].detach().cpu().numpy() * 8  # scale back (stride=8)
                 sz = np.clip(sz, 8, 64).astype(int)
                 
                 # Get center in original space
                 stride = 8
-                center = np.array([d, h, w]) * stride + offset[b, :, d, h, w].cpu().numpy() * stride
+                center = np.array([d, h, w]) * stride + offset[b, :, d, h, w].detach().cpu().numpy() * stride
                 center = center.astype(int)
                 
                 # Crop RoI
