@@ -244,7 +244,7 @@ def reconstruct_segmentation_from_rois(roi_masks, roi_info, original_shape):
 class DetSegModel(nn.Module):
     """Two-Stage Detection + Segmentation"""
     
-    def __init__(self, roi_size=32, det_threshold=0.3, max_rois=100, val_threshold=0.1, roi_batch_size=32):
+    def __init__(self, roi_size=32, det_threshold=0.3, max_rois=64, val_threshold=0.1, roi_batch_size=8):
         super().__init__()
         self.detection_net = DetectionNetwork()
         self.segmentation_net = SegmentationNetwork(roi_size=roi_size)
