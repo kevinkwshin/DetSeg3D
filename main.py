@@ -386,9 +386,9 @@ def train_epoch(model, loader, optimizer, device, epoch, scaler=None, use_fp16=F
                 # Forward with loss computation (memory efficient for DataParallel)
                 loss = model(images, mode='train', return_loss=True, labels=labels)
                 
-                # If multi-GPU, loss is already averaged by DataParallel
-                if not isinstance(loss, torch.Tensor):
-                    loss = loss.mean()  # Average losses from multiple GPUs
+                # DataParallel returns vector of losses, need to average
+                if loss.dim() > 0:
+                    loss = loss.mean()
             
             # Backward with scaling
             scaler.scale(loss).backward()
@@ -399,8 +399,8 @@ def train_epoch(model, loader, optimizer, device, epoch, scaler=None, use_fp16=F
             # Forward with loss computation
             loss = model(images, mode='train', return_loss=True, labels=labels)
             
-            # If multi-GPU, loss is already averaged by DataParallel
-            if hasattr(loss, 'mean'):
+            # DataParallel returns vector of losses, need to average
+            if loss.dim() > 0:
                 loss = loss.mean()
             
             # Backward
