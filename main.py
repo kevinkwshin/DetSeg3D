@@ -523,8 +523,20 @@ def main():
             full_dataset, [train_size, val_size]
         )
         
-        train_loader = DataLoader(train_dataset, batch_size=args.batch_size, shuffle=True, num_workers=4)
-        val_loader = DataLoader(val_dataset, batch_size=1, shuffle=False, num_workers=2)
+        train_loader = DataLoader(
+            train_dataset, 
+            batch_size=args.batch_size, 
+            shuffle=True, 
+            num_workers=4,
+            collate_fn=list_data_collate
+        )
+        val_loader = DataLoader(
+            val_dataset, 
+            batch_size=1, 
+            shuffle=False, 
+            num_workers=2,
+            collate_fn=list_data_collate
+        )
         
         print(f"Train: {len(train_dataset)}, Val: {len(val_dataset)}")
         
@@ -554,7 +566,13 @@ def main():
         assert args.test_image_dir and args.test_label_dir, "Test directories required"
         
         test_dataset = MedicalDataset(args.test_image_dir, args.test_label_dir, val_transforms)
-        test_loader = DataLoader(test_dataset, batch_size=1, shuffle=False, num_workers=2)
+        test_loader = DataLoader(
+            test_dataset, 
+            batch_size=1, 
+            shuffle=False, 
+            num_workers=2,
+            collate_fn=list_data_collate
+        )
         
         # Load model
         model = DetSegModel(roi_size=args.roi_size).to(args.device)
