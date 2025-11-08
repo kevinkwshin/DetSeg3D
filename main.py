@@ -9,6 +9,7 @@ import argparse
 import numpy as np
 from pathlib import Path
 from glob import glob
+from tqdm import tqdm
 
 import torch
 import torch.nn as nn
@@ -352,7 +353,8 @@ def train_epoch(model, loader, optimizer, device, epoch):
     model.train()
     total_loss = 0
     
-    for batch_idx, batch in enumerate(loader):
+    pbar = tqdm(enumerate(loader), total=len(loader), desc=f"Epoch {epoch} [Train]")
+    for batch_idx, batch in pbar:
         images = batch['image'].to(device)
         labels = batch['label'].to(device)
         
@@ -383,8 +385,8 @@ def train_epoch(model, loader, optimizer, device, epoch):
         
         total_loss += loss.item()
         
-        if batch_idx % 10 == 0:
-            print(f"Epoch {epoch} [{batch_idx}/{len(loader)}] Loss: {loss.item():.4f}")
+        # Update progress bar
+        pbar.set_postfix({'loss': f'{loss.item():.4f}', 'avg_loss': f'{total_loss/(batch_idx+1):.4f}'})
     
     return total_loss / len(loader)
 
@@ -394,7 +396,8 @@ def validate(model, loader, device):
     dice_metric = DiceMetric(reduction='mean')
     
     with torch.no_grad():
-        for batch in loader:
+        pbar = tqdm(loader, desc="[Val]", leave=False)
+        for batch in pbar:
             images = batch['image'].to(device)
             labels = batch['label'].to(device)
             
@@ -426,7 +429,8 @@ def test_and_save(model, loader, device, output_dir):
     results = []
     
     with torch.no_grad():
-        for idx, batch in enumerate(loader):
+        pbar = tqdm(enumerate(loader), total=len(loader), desc="[Test]")
+        for idx, batch in pbar:
             images = batch['image'].to(device)
             labels = batch['label'].to(device)
             
@@ -457,7 +461,8 @@ def test_and_save(model, loader, device, output_dir):
             }
             results.append(result_info)
             
-            print(f"Sample {idx}: Dice={dice_score:.4f}, RoIs={len(roi_info)}")
+            # Update progress bar
+            pbar.set_postfix({'dice': f'{dice_score:.4f}', 'rois': len(roi_info)})
     
     # Save summary
     mean_dice = np.mean([r['dice'] for r in results])
@@ -546,20 +551,28 @@ def main():
         
         # Training loop
         best_val = 0.0
+        print(f"\n{'='*70}")
+        print(f"Starting training for {args.epochs} epochs")
+        print(f"{'='*70}\n")
+        
         for epoch in range(args.epochs):
             train_loss = train_epoch(model, train_loader, optimizer, args.device, epoch)
             val_score = validate(model, val_loader, args.device)
             scheduler.step()
             
-            print(f"Epoch {epoch}: Train Loss={train_loss:.4f}, Val Score={val_score:.4f}")
+            print(f"Epoch {epoch:3d} | Train Loss: {train_loss:.4f} | Val Dice: {val_score:.4f}", end="")
             
             # Save checkpoint
             if val_score > best_val:
                 best_val = val_score
                 torch.save(model.state_dict(), os.path.join(args.output_dir, 'best_model.pth'))
-                print(f"Saved best model (score={best_val:.4f})")
+                print(f" | ★ Best!")
+            else:
+                print()
         
-        print("Training completed!")
+        print(f"\n{'='*70}")
+        print(f"Training completed! Best Val Dice: {best_val:.4f}")
+        print(f"{'='*70}\n")
     
     else:  # test mode
         assert args.test_image_dir and args.test_label_dir, "Test directories required"
