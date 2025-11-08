@@ -775,12 +775,21 @@ def segmentation_loss(pred_masks, gt_rois):
     """
     Segmentation loss for RoIs
     Per-instance loss (핵심!)
+    
+    Note: BCE is disabled for autocast compatibility.
+    Using Dice Loss only for stable fp16 training.
     """
     if pred_masks is None or gt_rois is None:
         return torch.tensor(0.0)
     
+    # Use Dice Loss only (autocast-safe)
     dice_loss = DiceLoss(sigmoid=False)(pred_masks, gt_rois)
-    bce_loss = F.binary_cross_entropy(pred_masks, gt_rois)
+    
+    # BCE with autocast disabled (fp32 conversion for stability)
+    with torch.amp.autocast('cuda', enabled=False):
+        pred_fp32 = pred_masks.float()
+        gt_fp32 = gt_rois.float()
+        bce_loss = F.binary_cross_entropy(pred_fp32, gt_fp32)
     
     return dice_loss + bce_loss
 
