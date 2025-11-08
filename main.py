@@ -321,6 +321,10 @@ class DetSegModel(nn.Module):
                 roi_crop = F.interpolate(roi_crop, size=(self.roi_size, self.roi_size, self.roi_size),
                                         mode='trilinear', align_corners=False)
                 
+                # Convert MetaTensor to regular tensor to avoid metadata conflicts
+                if hasattr(roi_crop, 'as_tensor'):
+                    roi_crop = roi_crop.as_tensor()
+                
                 rois.append(roi_crop)
                 roi_info.append({
                     'batch': b,
@@ -362,6 +366,10 @@ class DetSegModel(nn.Module):
             )
             
             if rois is not None:
+                # Convert MetaTensor to regular Tensor to avoid metadata issues during slicing
+                if hasattr(rois, 'as_tensor'):
+                    rois = rois.as_tensor()
+                
                 # Process RoIs in mini-batches for training too
                 roi_masks_list = []
                 num_rois = rois.shape[0]
@@ -390,6 +398,10 @@ class DetSegModel(nn.Module):
             )
             
             if rois is not None:
+                # Convert MetaTensor to regular Tensor to avoid metadata issues during slicing
+                if hasattr(rois, 'as_tensor'):
+                    rois = rois.as_tensor()
+                
                 # Process RoIs in mini-batches to avoid OOM
                 roi_masks_list = []
                 num_rois = rois.shape[0]
