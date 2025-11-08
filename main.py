@@ -434,8 +434,39 @@ class DetSegModel(nn.Module):
             # Compute loss here to avoid gathering large tensors
             det_loss = detection_loss(heatmap, size, offset, labels)
             
-            # Segmentation loss (simplified)
+            # Segmentation loss - MUST compute ROIs and segment!
+            rois, roi_info = self.extract_rois_from_heatmap(
+                x, heatmap, size, offset, self.det_threshold, max_rois=self.max_rois
+            )
+            
             seg_loss = torch.tensor(0.0, device=x.device)
+            if rois is not None and len(rois) > 0:
+                # Process ROIs through segmentation network
+                masks = self.process_variable_size_rois(rois)
+                
+                # Extract GT ROIs for loss computation
+                gt_rois = []
+                for info in roi_info:
+                    b = info['batch']
+                    bbox = info['bbox']
+                    d_start, h_start, w_start, d_end, h_end, w_end = bbox
+                    gt_crop = labels[b:b+1, :, d_start:d_end, h_start:h_end, w_start:w_end]
+                    
+                    # Resize to match predicted mask size
+                    target_size = info['roi_shape']
+                    gt_resized = F.interpolate(gt_crop, size=target_size, mode='trilinear', align_corners=False)
+                    gt_resized = (gt_resized > 0.5).float()  # Binarize
+                    
+                    if hasattr(gt_resized, 'as_tensor'):
+                        gt_resized = gt_resized.as_tensor()
+                    
+                    gt_rois.append(gt_resized)
+                
+                # Compute segmentation loss
+                if len(masks) > 0 and len(gt_rois) > 0:
+                    pred_stack = torch.cat(masks, dim=0)
+                    gt_stack = torch.cat(gt_rois, dim=0)
+                    seg_loss = segmentation_loss(pred_stack, gt_stack)
             
             total_loss = det_loss + 2.0 * seg_loss
             return total_loss
@@ -682,7 +713,7 @@ def generate_centerdet_targets(batch_bboxes, output_shape, stride=8):
     return gt_heatmap, gt_size, gt_offset
 
 
-def detection_loss(pred_heatmap, pred_size, pred_offset, gt_label, focal_alpha=2.0):
+def detection_loss(pred_heatmap, pred_size, pred_offset, gt_label, focal_alpha=2.0, return_stats=False):
     """
     CenterNet-style Detection Loss
     
@@ -691,12 +722,17 @@ def detection_loss(pred_heatmap, pred_size, pred_offset, gt_label, focal_alpha=2
         pred_size: (B, 3, D/8, H/8, W/8) predicted bbox size
         pred_offset: (B, 3, D/8, H/8, W/8) predicted offset
         gt_label: (B, 1, D, H, W) ground truth segmentation
+        return_stats: if True, return diagnostic statistics
     
     Returns:
         total_loss: scalar
+        stats: dict (if return_stats=True)
     """
     # 1. Extract GT bboxes from segmentation label
     batch_bboxes = extract_bboxes_from_label(gt_label)
+    
+    # Count GT objects
+    num_gt_objects = sum(len(bboxes) for bboxes in batch_bboxes)
     
     # 2. Generate CenterNet targets
     B, _, D, H, W = pred_heatmap.shape
@@ -720,6 +756,17 @@ def detection_loss(pred_heatmap, pred_size, pred_offset, gt_label, focal_alpha=2
     
     # Total loss
     total_loss = focal_loss + 0.5 * size_loss + 0.1 * offset_loss
+    
+    if return_stats:
+        stats = {
+            'focal_loss': focal_loss.item(),
+            'size_loss': size_loss.item(),
+            'offset_loss': offset_loss.item(),
+            'num_gt_objects': num_gt_objects,
+            'heatmap_max': pred_heatmap.max().item(),
+            'gt_heatmap_max': gt_heatmap.max().item()
+        }
+        return total_loss, stats
     
     return total_loss
 
@@ -782,6 +829,10 @@ def train_epoch(model, loader, optimizer, device, epoch, scaler=None, use_fp16=F
         
         total_loss += loss.item()
         
+        # Debugging: print diagnostic info every 50 iterations
+        if batch_idx % 50 == 0 and batch_idx > 0:
+            print(f"\n[DIAG Epoch {epoch}, Iter {batch_idx}] Loss: {loss.item():.4f}, Avg: {total_loss/(batch_idx+1):.4f}")
+        
         # Update progress bar
         pbar.set_postfix({'loss': f'{loss.item():.4f}', 'avg_loss': f'{total_loss/(batch_idx+1):.4f}'})
     
@@ -813,11 +864,13 @@ def validate(model, loader, device, use_multi_gpu=True):
         model_to_use.return_simple = False
     
     dice_metric = DiceMetric(reduction='mean')
+    total_rois = 0
+    num_batches = 0
     
     try:
         with torch.no_grad():
             pbar = tqdm(loader, desc="[Val]", leave=False)
-            for batch in pbar:
+            for batch_idx, batch in enumerate(pbar):
                 images = batch['image'].to(device)
                 labels = batch['label'].to(device)
                 
@@ -827,6 +880,9 @@ def validate(model, loader, device, use_multi_gpu=True):
                 # Extract segmentation (handle both tensor and dict)
                 if isinstance(outputs, dict):
                     full_seg = outputs['full_segmentation']
+                    # Count ROIs if available
+                    if 'roi_info' in outputs:
+                        total_rois += len(outputs['roi_info'])
                 else:
                     full_seg = outputs  # Already tensor
                 
@@ -835,6 +891,13 @@ def validate(model, loader, device, use_multi_gpu=True):
                 
                 # Calculate Dice
                 dice_metric(y_pred=full_seg_binary, y=labels)
+                num_batches += 1
+                
+                # Print diagnostic info for first batch
+                if batch_idx == 0 and isinstance(outputs, dict) and 'roi_info' in outputs:
+                    print(f"\n[VAL DIAG] First batch: {len(outputs['roi_info'])} ROIs detected")
+                    if len(outputs['roi_info']) > 0:
+                        print(f"[VAL DIAG] Confidence range: {outputs['roi_info'][0]['confidence']:.4f} - {outputs['roi_info'][-1]['confidence']:.4f}")
     finally:
         # Reset return_simple flag
         if isinstance(model, nn.DataParallel):
@@ -846,6 +909,10 @@ def validate(model, loader, device, use_multi_gpu=True):
     # Aggregate metric
     mean_dice = dice_metric.aggregate().item()
     dice_metric.reset()
+    
+    # Print validation statistics
+    avg_rois = total_rois / max(num_batches, 1)
+    print(f"\n[VAL STATS] Avg ROIs per batch: {avg_rois:.1f}, Total: {total_rois}")
     
     return mean_dice
 
