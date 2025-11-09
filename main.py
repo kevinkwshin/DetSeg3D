@@ -151,18 +151,20 @@ class SegmentationNetwork(nn.Module):
     """
     Enhanced 3D Segmentation Network for RoI
     More powerful with deeper U-Net and residual connections
+    Multi-class segmentation: Class 0 (background), Class 1 (hemorrhage)
     """
     
-    def __init__(self, roi_size=32):
+    def __init__(self, roi_size=32, num_classes=2):
         super().__init__()
         self.roi_size = roi_size
+        self.num_classes = num_classes
         
         # Enhanced 3D U-Net with more depth and residual units
         # Using InstanceNorm for stability with small ROIs (BatchNorm fails on 1x1x1 features)
         self.unet = UNet(
             spatial_dims=3,
             in_channels=1,
-            out_channels=1,
+            out_channels=num_classes,  # Multi-class: background + hemorrhage
             channels=(32, 64, 128, 256),  # Deeper network
             strides=(2, 2, 2),
             num_res_units=2,  # More residual units per level
@@ -176,40 +178,48 @@ class SegmentationNetwork(nn.Module):
         Args:
             roi_crops: (N_rois, 1, D, H, W) - batch of RoI crops
         Returns:
-            masks: (N_rois, 1, D, H, W) - segmentation masks
+            probs: (N_rois, num_classes, D, H, W) - softmax probabilities
         """
         if roi_crops.shape[0] == 0:
-            return torch.zeros_like(roi_crops)
+            # Return zero tensor with correct number of classes
+            return torch.zeros(roi_crops.shape[0], self.num_classes, *roi_crops.shape[2:], 
+                              device=roi_crops.device, dtype=roi_crops.dtype)
         
-        masks = torch.sigmoid(self.unet(roi_crops))
-        return masks
+        logits = self.unet(roi_crops)
+        probs = torch.softmax(logits, dim=1)  # Multi-class softmax
+        return probs
 
 
 # ============================================================================
 # RoI Reconstruction
 # ============================================================================
 
-def reconstruct_segmentation_from_rois(roi_masks, roi_info, original_shape):
+def reconstruct_segmentation_from_rois(roi_masks, roi_info, original_shape, num_classes=2):
     """
-    RoI segmentation 결과를 원본 이미지 크기로 재구성
+    RoI segmentation 결과를 원본 이미지 크기로 재구성 (Multi-class)
     
     Args:
-        roi_masks: List of (1, 1, D, H, W) - RoI segmentation masks (variable sizes)
+        roi_masks: List of (1, num_classes, D, H, W) - RoI segmentation probabilities
         roi_info: List of dicts with 'bbox', 'roi_shape' info
         original_shape: (D, H, W) - 원본 볼륨 크기
+        num_classes: Number of classes (default: 2 for background + hemorrhage)
     
     Returns:
-        full_seg: (1, 1, D, H, W) - 재구성된 전체 segmentation
+        full_seg: (1, num_classes, D, H, W) - 재구성된 전체 segmentation probabilities
     """
     if roi_masks is None or len(roi_info) == 0:
-        return torch.zeros(1, 1, *original_shape)
+        # Return background probability = 1.0
+        full_seg = torch.zeros(1, num_classes, *original_shape)
+        full_seg[0, 0] = 1.0  # Background class
+        return full_seg
     
     D, H, W = original_shape
     # Get device from first mask
     device = roi_masks[0].device if isinstance(roi_masks, list) else roi_masks.device
     
-    # 전체 segmentation map 초기화
-    full_seg = torch.zeros(1, 1, D, H, W, device=device)
+    # 전체 segmentation map 초기화 (multi-class)
+    full_seg = torch.zeros(1, num_classes, D, H, W, device=device)
+    full_seg[0, 0] = 1.0  # Initialize with background probability = 1.0
     count_map = torch.zeros(1, 1, D, H, W, device=device)  # 겹침 처리용
     
     for i, info in enumerate(roi_info):
@@ -220,8 +230,7 @@ def reconstruct_segmentation_from_rois(roi_masks, roi_info, original_shape):
         d_start, h_start, w_start, d_end, h_end, w_end = info['bbox']
         original_size = (d_end - d_start, h_end - h_start, w_end - w_start)
         
-        # Resize to original bbox size
-        # (roi_mask may already be close to original size if it was a small lesion)
+        # Resize to original bbox size (all classes)
         resized_mask = F.interpolate(
             roi_mask, 
             size=original_size,
@@ -229,13 +238,16 @@ def reconstruct_segmentation_from_rois(roi_masks, roi_info, original_shape):
             align_corners=False
         )
         
-        # 원본 볼륨의 해당 위치에 배치
-        full_seg[0, 0, d_start:d_end, h_start:h_end, w_start:w_end] += resized_mask[0, 0]
+        # 원본 볼륨의 해당 위치에 배치 (all classes)
+        full_seg[0, :, d_start:d_end, h_start:h_end, w_start:w_end] += resized_mask[0]
         count_map[0, 0, d_start:d_end, h_start:h_end, w_start:w_end] += 1
     
     # 겹치는 영역은 평균 처리
     count_map = torch.clamp(count_map, min=1)
     full_seg = full_seg / count_map
+    
+    # Re-normalize to sum to 1 (valid probability distribution)
+    full_seg = full_seg / full_seg.sum(dim=1, keepdim=True).clamp(min=1e-6)
     
     return full_seg
 
@@ -245,20 +257,22 @@ def reconstruct_segmentation_from_rois(roi_masks, roi_info, original_shape):
 # ============================================================================
 
 class DetSegModel(nn.Module):
-    """Two-Stage Detection + Segmentation"""
+    """Two-Stage Detection + Segmentation (Multi-class)"""
     
     def __init__(self, roi_size=32, det_threshold=0.3, max_rois=64, val_threshold=0.1, roi_batch_size=8,
-                 small_roi_threshold=64, max_roi_size=128):
+                 small_roi_threshold=64, max_roi_size=128, num_classes=2, min_roi_depth=8):
         super().__init__()
         self.detection_net = DetectionNetwork()
-        self.segmentation_net = SegmentationNetwork(roi_size=roi_size)
+        self.segmentation_net = SegmentationNetwork(roi_size=roi_size, num_classes=num_classes)
         self.roi_size = roi_size
+        self.num_classes = num_classes  # Number of segmentation classes
         self.det_threshold = det_threshold  # Training threshold
         self.max_rois = max_rois  # Maximum RoIs per image
         self.val_threshold = val_threshold  # Validation/test threshold
         self.roi_batch_size = roi_batch_size  # Mini-batch size for RoI processing
         self.small_roi_threshold = small_roi_threshold  # Keep original size if smaller
         self.max_roi_size = max_roi_size  # Max size for large ROIs
+        self.min_roi_depth = min_roi_depth  # Minimum depth (W) for anisotropic data
         self.return_simple = False  # For multi-GPU validation
         
     def extract_rois_from_heatmap(self, volume, heatmap, size, offset, threshold=0.3, max_rois=100):
@@ -307,12 +321,18 @@ class DetSegModel(nn.Module):
                 sz = size[b, :, d, h, w].detach().cpu().numpy() * 8  # scale back (stride=8)
                 sz = np.clip(sz, 8, 64).astype(int)
                 
+                # For anisotropic data: ensure minimum depth (W dimension)
+                # Lesions may be only 1 slice thick, but we need context for U-Net
+                min_depth = self.min_roi_depth  # Minimum depth for stable U-Net processing
+                if sz[2] < min_depth:
+                    sz[2] = min_depth
+                
                 # Get center in original space
                 stride = 8
                 center = np.array([d, h, w]) * stride + offset[b, :, d, h, w].detach().cpu().numpy() * stride
                 center = center.astype(int)
                 
-                # Crop RoI
+                # Crop RoI with adjusted size
                 d_start = max(0, int(center[0] - sz[0]//2))
                 h_start = max(0, int(center[1] - sz[1]//2))
                 w_start = max(0, int(center[2] - sz[2]//2))
@@ -320,6 +340,27 @@ class DetSegModel(nn.Module):
                 d_end = min(volume.shape[2], d_start + sz[0])
                 h_end = min(volume.shape[3], h_start + sz[1])
                 w_end = min(volume.shape[4], w_start + sz[2])
+                
+                # Adjust if bbox exceeds volume boundary (especially for depth)
+                # Ensure minimum size even at boundaries
+                if (d_end - d_start) < sz[0] and d_end < volume.shape[2]:
+                    d_end = min(volume.shape[2], d_start + sz[0])
+                if (h_end - h_start) < sz[1] and h_end < volume.shape[3]:
+                    h_end = min(volume.shape[3], h_start + sz[1])
+                if (w_end - w_start) < min_depth and w_end < volume.shape[4]:
+                    # If depth is too small, expand the ROI
+                    needed = min_depth - (w_end - w_start)
+                    # Try to expand equally on both sides
+                    expand_start = needed // 2
+                    expand_end = needed - expand_start
+                    w_start = max(0, w_start - expand_start)
+                    w_end = min(volume.shape[4], w_end + expand_end)
+                    # If still not enough (at boundary), take what we can
+                    if (w_end - w_start) < min_depth:
+                        if w_start == 0:
+                            w_end = min(volume.shape[4], min_depth)
+                        elif w_end == volume.shape[4]:
+                            w_start = max(0, volume.shape[4] - min_depth)
                 
                 roi_crop = volume[b:b+1, :, d_start:d_end, h_start:h_end, w_start:w_end]
                 
@@ -511,10 +552,13 @@ class DetSegModel(nn.Module):
                 # RoI 결과를 원본 크기로 재구성
                 original_shape = x.shape[2:]  # (D, H, W)
                 full_segmentation = reconstruct_segmentation_from_rois(
-                    roi_masks, roi_info, original_shape
+                    roi_masks, roi_info, original_shape, num_classes=self.num_classes
                 )
             else:
-                full_segmentation = torch.zeros_like(x)
+                # No ROIs detected: return background probability = 1.0
+                full_segmentation = torch.zeros(x.shape[0], self.num_classes, *x.shape[2:], 
+                                               device=x.device, dtype=x.dtype)
+                full_segmentation[:, 0] = 1.0  # Background class
             
             # Simple output for multi-GPU validation (controlled by attribute)
             if self.return_simple:
@@ -780,25 +824,31 @@ def detection_loss(pred_heatmap, pred_size, pred_offset, gt_label, focal_alpha=2
 
 def segmentation_loss(pred_masks, gt_rois):
     """
-    Segmentation loss for RoIs
+    Multi-class Segmentation loss for RoIs
     Per-instance loss (핵심!)
     
-    Note: BCE is disabled for autocast compatibility.
-    Using Dice Loss only for stable fp16 training.
+    Args:
+        pred_masks: (N, num_classes, D, H, W) - softmax probabilities
+        gt_rois: (N, 1, D, H, W) - ground truth labels (0 or 1)
     """
     if pred_masks is None or gt_rois is None:
-        return torch.tensor(0.0)
+        return torch.tensor(0.0, device=pred_masks.device if pred_masks is not None else 'cpu')
     
-    # Use Dice Loss only (autocast-safe)
-    dice_loss = DiceLoss(sigmoid=False)(pred_masks, gt_rois)
+    # Multi-class Dice Loss (autocast-safe)
+    dice_loss = DiceLoss(
+        include_background=True,
+        to_onehot_y=True,
+        softmax=False,  # Already applied softmax in forward
+        reduction='mean'
+    )(pred_masks, gt_rois.long())
     
-    # BCE with autocast disabled (fp32 conversion for stability)
+    # Cross-Entropy Loss with autocast disabled (fp32 for stability)
     with torch.amp.autocast('cuda', enabled=False):
         pred_fp32 = pred_masks.float()
-        gt_fp32 = gt_rois.float()
-        bce_loss = F.binary_cross_entropy(pred_fp32, gt_fp32)
+        gt_fp32 = gt_rois.long().squeeze(1)  # (N, D, H, W)
+        ce_loss = F.cross_entropy(pred_fp32, gt_fp32, reduction='mean')
     
-    return dice_loss + bce_loss
+    return dice_loss + ce_loss
 
 
 # ============================================================================
@@ -845,7 +895,12 @@ def train_epoch(model, loader, optimizer, device, epoch, scaler=None, use_fp16=F
         
         total_loss += loss.item()
         
-        # Debugging: print diagnostic info every 50 iterations
+        # Debugging: print diagnostic info
+        if batch_idx == 0:
+            print(f"\n[DEBUG Epoch {epoch}] Input shape: {images.shape} (B, C, D, H, W)")
+            print(f"[DEBUG] Spatial dimensions: D={images.shape[2]}, H={images.shape[3]}, W={images.shape[4]}")
+            print(f"[DEBUG] Expected detection output: ({images.shape[2]//8}, {images.shape[3]//8}, {images.shape[4]//8})")
+        
         if batch_idx % 50 == 0 and batch_idx > 0:
             print(f"\n[DIAG Epoch {epoch}, Iter {batch_idx}] Loss: {loss.item():.4f}, Avg: {total_loss/(batch_idx+1):.4f}")
         
@@ -902,11 +957,15 @@ def validate(model, loader, device, use_multi_gpu=True):
                 else:
                     full_seg = outputs  # Already tensor
                 
-                # Threshold
-                full_seg_binary = (full_seg > 0.5).float()
+                # Multi-class output: (B, num_classes, D, H, W) → (B, 1, D, H, W)
+                # Get class with highest probability (argmax)
+                if full_seg.shape[1] > 1:  # Multi-class
+                    pred_class = torch.argmax(full_seg, dim=1, keepdim=True).float()  # (B, 1, D, H, W)
+                else:  # Binary (legacy support)
+                    pred_class = (full_seg > 0.5).float()
                 
-                # Calculate Dice
-                dice_metric(y_pred=full_seg_binary, y=labels)
+                # Calculate Dice (only for foreground class)
+                dice_metric(y_pred=pred_class, y=labels)
                 num_batches += 1
                 
                 # Print diagnostic info for first batch
@@ -961,16 +1020,20 @@ def test_and_save(model, loader, device, output_dir):
             full_seg = outputs['full_segmentation']
             roi_info = outputs['roi_info']
             
-            # Threshold
-            full_seg_binary = (full_seg > 0.5).float()
+            # Multi-class output: (B, num_classes, D, H, W) → (B, 1, D, H, W)
+            # Get class with highest probability (argmax)
+            if full_seg.shape[1] > 1:  # Multi-class
+                pred_class = torch.argmax(full_seg, dim=1, keepdim=True).float()  # (B, 1, D, H, W)
+            else:  # Binary (legacy support)
+                pred_class = (full_seg > 0.5).float()
             
             # Calculate Dice
-            dice_metric(y_pred=full_seg_binary, y=labels)
+            dice_metric(y_pred=pred_class, y=labels)
             dice_score = dice_metric.aggregate().item()
             dice_metric.reset()
             
-            # Save prediction
-            pred_np = full_seg_binary[0, 0].cpu().numpy().astype(np.uint8)
+            # Save prediction (class label: 0 or 1)
+            pred_np = pred_class[0, 0].cpu().numpy().astype(np.uint8)
             pred_path = os.path.join(output_dir, 'predictions', f'pred_{idx:04d}.npy')
             np.save(pred_path, pred_np)
             
@@ -1025,6 +1088,7 @@ def main():
     parser.add_argument('--val_interval', type=int, default=1, help='Validation interval (epochs)')
     parser.add_argument('--small_roi_threshold', type=int, default=64, help='Keep ROIs smaller than this threshold at original size')
     parser.add_argument('--max_roi_size', type=int, default=128, help='Maximum ROI size (resize larger ROIs)')
+    parser.add_argument('--min_roi_depth', type=int, default=8, help='Minimum ROI depth (W dimension) for anisotropic data')
     args = parser.parse_args()
     
     # Set validation batch size
@@ -1108,7 +1172,8 @@ def main():
             val_threshold=args.val_threshold,
             roi_batch_size=args.roi_batch_size,
             small_roi_threshold=args.small_roi_threshold,
-            max_roi_size=args.max_roi_size
+            max_roi_size=args.max_roi_size,
+            min_roi_depth=args.min_roi_depth
         ).to(args.device)
         
         print(f"\nModel configuration:")
@@ -1117,6 +1182,7 @@ def main():
         print(f"  - Max RoIs per image: {args.max_rois}")
         print(f"  - Val/Test threshold: {args.val_threshold}")
         print(f"  - RoI mini-batch size: {args.roi_batch_size}")
+        print(f"  - Min ROI depth (W): {args.min_roi_depth} (for anisotropic data)")
         print(f"  - Validation interval: every {args.val_interval} epoch(s)")
         
         # Multi-GPU
@@ -1206,7 +1272,8 @@ def main():
             val_threshold=args.val_threshold,
             roi_batch_size=args.roi_batch_size,
             small_roi_threshold=args.small_roi_threshold,
-            max_roi_size=args.max_roi_size
+            max_roi_size=args.max_roi_size,
+            min_roi_depth=args.min_roi_depth
         ).to(args.device)
         model.load_state_dict(torch.load(os.path.join(args.output_dir, 'best_model.pth')))
         
