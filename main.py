@@ -855,7 +855,7 @@ def segmentation_loss(pred_masks, gt_rois):
 # Training
 # ============================================================================
 
-def train_epoch(model, loader, optimizer, device, epoch, scaler=None, use_fp16=False):
+def train_epoch(model, loader, optimizer, device, epoch, scaler=None, use_fp16=False, debug=False):
     model.train()
     total_loss = 0
     
@@ -863,6 +863,22 @@ def train_epoch(model, loader, optimizer, device, epoch, scaler=None, use_fp16=F
     for batch_idx, batch in pbar:
         images = batch['image'].to(device)
         labels = batch['label'].to(device)
+        
+        if debug and batch_idx == 0:
+            print(f"\n{'='*80}")
+            print(f"[DEBUG] Epoch {epoch} - First Batch Details")
+            print(f"{'='*80}")
+            print(f"Input shape: {images.shape} (B, C, D, H, W)")
+            print(f"  - Batch size: {images.shape[0]}")
+            print(f"  - Spatial: D={images.shape[2]}, H={images.shape[3]}, W={images.shape[4]}")
+            print(f"  - Data type: {images.dtype}")
+            print(f"  - Device: {images.device}")
+            print(f"  - Value range: [{images.min().item():.4f}, {images.max().item():.4f}]")
+            print(f"\nLabel shape: {labels.shape}")
+            print(f"  - Unique values: {torch.unique(labels).cpu().numpy()}")
+            print(f"  - Foreground voxels: {(labels > 0).sum().item()}")
+            print(f"\nExpected detection output: ({images.shape[2]//8}, {images.shape[3]//8}, {images.shape[4]//8})")
+            print(f"{'='*80}\n")
         
         optimizer.zero_grad()
         
@@ -895,14 +911,11 @@ def train_epoch(model, loader, optimizer, device, epoch, scaler=None, use_fp16=F
         
         total_loss += loss.item()
         
-        # Debugging: print diagnostic info
-        if batch_idx == 0:
-            print(f"\n[DEBUG Epoch {epoch}] Input shape: {images.shape} (B, C, D, H, W)")
-            print(f"[DEBUG] Spatial dimensions: D={images.shape[2]}, H={images.shape[3]}, W={images.shape[4]}")
-            print(f"[DEBUG] Expected detection output: ({images.shape[2]//8}, {images.shape[3]//8}, {images.shape[4]//8})")
-        
-        if batch_idx % 50 == 0 and batch_idx > 0:
-            print(f"\n[DIAG Epoch {epoch}, Iter {batch_idx}] Loss: {loss.item():.4f}, Avg: {total_loss/(batch_idx+1):.4f}")
+        # Periodic diagnostics
+        if debug and batch_idx % 50 == 0 and batch_idx > 0:
+            print(f"\n[DIAG Epoch {epoch}, Iter {batch_idx}]")
+            print(f"  Loss: {loss.item():.4f}, Avg: {total_loss/(batch_idx+1):.4f}")
+            print(f"  Memory allocated: {torch.cuda.memory_allocated(device) / 1024**3:.2f} GB")
         
         # Update progress bar
         pbar.set_postfix({'loss': f'{loss.item():.4f}', 'avg_loss': f'{total_loss/(batch_idx+1):.4f}'})
@@ -910,13 +923,14 @@ def train_epoch(model, loader, optimizer, device, epoch, scaler=None, use_fp16=F
     return total_loss / len(loader)
 
 
-def validate(model, loader, device, use_multi_gpu=True):
+def validate(model, loader, device, use_multi_gpu=True, debug=False):
     """
     Validation with optional multi-GPU support
     
     Args:
         use_multi_gpu: If True and model is DataParallel, use multi-GPU
                        If False, use single GPU (more stable for debugging)
+        debug: Enable debug output
     """
     if use_multi_gpu and isinstance(model, nn.DataParallel):
         # Multi-GPU validation (faster)
@@ -969,7 +983,28 @@ def validate(model, loader, device, use_multi_gpu=True):
                 num_batches += 1
                 
                 # Print diagnostic info for first batch
-                if batch_idx == 0 and isinstance(outputs, dict) and 'roi_info' in outputs:
+                if debug and batch_idx == 0:
+                    print(f"\n{'='*80}")
+                    print(f"[DEBUG] Validation - First Batch")
+                    print(f"{'='*80}")
+                    print(f"Input shape: {images.shape}")
+                    print(f"Output type: {type(outputs)}")
+                    if isinstance(outputs, dict):
+                        print(f"Output keys: {outputs.keys()}")
+                        if 'full_segmentation' in outputs:
+                            print(f"  full_segmentation shape: {outputs['full_segmentation'].shape}")
+                            print(f"  Probability range: [{outputs['full_segmentation'].min().item():.4f}, {outputs['full_segmentation'].max().item():.4f}]")
+                        if 'roi_info' in outputs:
+                            print(f"  ROIs detected: {len(outputs['roi_info'])}")
+                            if len(outputs['roi_info']) > 0:
+                                print(f"  Confidence range: [{min(r['confidence'] for r in outputs['roi_info']):.4f}, {max(r['confidence'] for r in outputs['roi_info']):.4f}]")
+                                print(f"  ROI sizes:")
+                                for i, roi in enumerate(outputs['roi_info'][:3]):  # First 3
+                                    print(f"    ROI {i+1}: size={roi['size']}, conf={roi['confidence']:.4f}")
+                    else:
+                        print(f"Output shape: {outputs.shape}")
+                    print(f"{'='*80}\n")
+                elif batch_idx == 0 and isinstance(outputs, dict) and 'roi_info' in outputs:
                     print(f"\n[VAL DIAG] First batch: {len(outputs['roi_info'])} ROIs detected")
                     if len(outputs['roi_info']) > 0:
                         print(f"[VAL DIAG] Confidence range: {outputs['roi_info'][0]['confidence']:.4f} - {outputs['roi_info'][-1]['confidence']:.4f}")
@@ -992,13 +1027,18 @@ def validate(model, loader, device, use_multi_gpu=True):
     return mean_dice
 
 
-def test_and_save(model, loader, device, output_dir):
+def test_and_save(model, loader, device, output_dir, debug=False):
     """Test and save segmentation results"""
     # Use single GPU for testing (batch_size=1)
     if isinstance(model, nn.DataParallel):
         model_eval = model.module
     else:
         model_eval = model
+    
+    if debug:
+        print(f"\n{'='*80}")
+        print(f"[DEBUG] Test Mode")
+        print(f"{'='*80}")
     
     model_eval.eval()
     model_eval.return_simple = False  # Return full dict for RoI info
@@ -1019,6 +1059,17 @@ def test_and_save(model, loader, device, output_dir):
             outputs = model_eval(images)
             full_seg = outputs['full_segmentation']
             roi_info = outputs['roi_info']
+            
+            # Debug output for first sample
+            if debug and idx == 0:
+                print(f"\n[DEBUG] Test Sample {idx}")
+                print(f"  Input: {images.shape}")
+                print(f"  Output: {full_seg.shape}")
+                print(f"  ROIs detected: {len(roi_info)}")
+                if len(roi_info) > 0:
+                    print(f"  ROI details:")
+                    for i, roi in enumerate(roi_info[:5]):  # First 5
+                        print(f"    {i+1}. Center: {roi['center']}, Size: {roi['size']}, Conf: {roi['confidence']:.4f}")
             
             # Multi-class output: (B, num_classes, D, H, W) → (B, 1, D, H, W)
             # Get class with highest probability (argmax)
@@ -1089,6 +1140,7 @@ def main():
     parser.add_argument('--small_roi_threshold', type=int, default=64, help='Keep ROIs smaller than this threshold at original size')
     parser.add_argument('--max_roi_size', type=int, default=128, help='Maximum ROI size (resize larger ROIs)')
     parser.add_argument('--min_roi_depth', type=int, default=8, help='Minimum ROI depth (W dimension) for anisotropic data')
+    parser.add_argument('--debug', action='store_true', help='Enable debug output (shapes, ROI info, loss components)')
     args = parser.parse_args()
     
     # Set validation batch size
@@ -1184,6 +1236,7 @@ def main():
         print(f"  - RoI mini-batch size: {args.roi_batch_size}")
         print(f"  - Min ROI depth (W): {args.min_roi_depth} (for anisotropic data)")
         print(f"  - Validation interval: every {args.val_interval} epoch(s)")
+        print(f"  - Debug mode: {'Enabled ✅' if args.debug else 'Disabled'}")
         
         # Multi-GPU
         if args.multi_gpu and torch.cuda.device_count() > 1:
@@ -1220,13 +1273,13 @@ def main():
         print(f"{'='*70}\n")
         
         for epoch in range(args.epochs):
-            train_loss = train_epoch(model, train_loader, optimizer, args.device, epoch, scaler, args.fp16)
+            train_loss = train_epoch(model, train_loader, optimizer, args.device, epoch, scaler, args.fp16, args.debug)
             
             # Validation - run every val_interval epochs
             if (epoch + 1) % args.val_interval == 0 or epoch == args.epochs - 1:
                 # Use single GPU for memory stability
                 # (multi-GPU validation can cause OOM when gathering large full_segmentation tensors)
-                val_score = validate(model, val_loader, args.device, use_multi_gpu=False)
+                val_score = validate(model, val_loader, args.device, use_multi_gpu=False, debug=args.debug)
                 
                 # Set model back to train mode after validation
                 model.train()
@@ -1278,7 +1331,7 @@ def main():
         model.load_state_dict(torch.load(os.path.join(args.output_dir, 'best_model.pth')))
         
         print("Testing and saving predictions...")
-        test_score, results = test_and_save(model, test_loader, args.device, args.output_dir)
+        test_score, results = test_and_save(model, test_loader, args.device, args.output_dir, args.debug)
         
         print(f"\nTest completed! Results saved to {args.output_dir}/predictions/")
 
