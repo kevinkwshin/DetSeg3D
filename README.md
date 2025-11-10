@@ -1,474 +1,454 @@
-# DetSeg3D: End-to-End RoI-based 3D Detection-Segmentation
+# DetSeg3D: 3D Medical Lesion Detection
 
-## 개요
+Professional 3D object detection for medical imaging based on **MONAI RetinaNet**.
 
-전체 3D volume에서 가볍게 RoI를 탐지하고, 각 RoI를 정밀하게 분할하는 two-stage 모델
+---
+
+## 🎯 Overview
+
+This project implements state-of-the-art **3D RetinaNet** for medical lesion detection using the **MONAI detection module**.
+
+**Key Features:**
+- ✅ **MONAI RetinaNet**: Production-ready 3D detection
+- ✅ **ResNet50 + FPN backbone**: Multi-scale feature extraction
+- ✅ **ATSS Matcher**: Adaptive Training Sample Selection
+- ✅ **Anchor-based detection**: Proven robust performance
+- ✅ **Auto segmentation-to-box conversion**: Works with segmentation labels
+- ✅ **Multi-GPU support**: DistributedDataParallel (DDP) training with `torchrun`
+- ✅ **AMP (Mixed Precision)**: Faster training with FP16
+- ✅ **Sliding window inference**: Handles large images
+- ✅ **COCO metrics**: Standard evaluation (mAP, mAR)
+
+---
+
+## 📐 Architecture
 
 ```
-Input: Full 3D Volume
+Input (1, D, H, W)
     ↓
-Stage 1: Detection Network (lightweight)
-    → RoI proposals + confidence scores
+ResNet50 Backbone
     ↓
-Stage 2: Segmentation Network (per RoI)
-    → Precise mask per lesion
+Feature Pyramid Network (FPN)
+    ├─ P3 (stride=8)
+    ├─ P4 (stride=16)
+    └─ P5 (stride=32)
+    ↓
+RetinaNet Heads
+    ├─ Classification Head (Focal Loss)
+    └─ Box Regression Head (L1 Loss)
+    ↓
+ATSS Matcher + Hard Negative Mining
+    ↓
+NMS (Non-Maximum Suppression)
+    ↓
+Output: Boxes + Confidence Scores
 ```
 
-**핵심 아이디어:** 작은 병변도 큰 병변과 동등한 가중치로 학습
+### Components
+
+#### 1. **Backbone: ResNet50**
+- Pre-downsampling with stride [2,2,1] for 3D medical images
+- Residual blocks: [3, 4, 6, 3] (ResNet50)
+- Output features from layer 1 and 2 for small lesion detection
+
+#### 2. **Feature Pyramid Network (FPN)**
+- Multi-scale features for detecting lesions of various sizes
+- Top-down pathway with lateral connections
+- Feature map scales: [1, 2, 4]
+
+#### 3. **RetinaNet Detection Heads**
+- **Classification head**: Focal loss for class imbalance
+- **Box regression head**: Smooth L1 loss
+- Anchors: Multiple aspect ratios per location
+
+#### 4. **ATSS Matcher**
+- Adaptive Training Sample Selection
+- Automatically determines positive/negative samples
+- Better than IoU-based matching for small objects
+
+#### 5. **Hard Negative Mining**
+- Balances positive/negative samples (ratio: 0.3)
+- Focuses on hard negatives
+- Reduces false positives
 
 ---
 
-## Architecture
-
-### Stage 1: Detection Network (CenterNet-style) ⭐
-
-**입력:** 원본 3D volume (no patches)  
-**출력:** RoI coordinates + confidence scores
-
-**구조:**
-- **MONAI ResNet-style backbone** with residual connections
-- Multi-scale feature extraction (3 levels, 8× downsampling)
-- Feature fusion layer
-- **CenterNet-style anchor-free heads**
-  - **Center heatmap** (Gaussian): 병변 중심점 위치
-  - **Bounding box size** (3D): (d, h, w) 예측
-  - **Center offset** (sub-pixel): 정밀한 중심 좌표
-
-**Training (CenterNet Style):**
-1. **GT Generation**: Segmentation label → Connected Components → BBoxes
-2. **Gaussian Heatmap**: 각 bbox center에 Gaussian kernel 생성
-3. **Size Target**: 각 center point에서 bbox 크기 학습
-4. **Offset Target**: Sub-pixel refinement
-
-**특징:**
-- ✅ **Proper Detection Training**: Size와 Offset이 실제로 학습됨
-- ✅ **Multi-scale Support**: 다양한 크기의 병변 대응
-- ✅ **Gaussian Heatmap**: CenterNet 논문과 동일한 방식
-- ✅ **Anchor-free**: Anchor 없이 직접 예측
-- Parameters: ~2.5M (적절한 균형)
-
-### Stage 2: Segmentation Network (Enhanced)
-
-**입력:** 각 RoI crop (예: 32³ resize)  
-**출력:** Binary mask per RoI
-
-**구조:**
-- **Enhanced 3D U-Net** with deeper architecture
-- 4-level encoder-decoder (32 → 64 → 128 → 256)
-- Residual units at each level (2 units)
-- Dropout (0.1) for regularization
-
-**특징:**
-- 각 RoI 독립적으로 처리 → 크기 무관 동등 가중치
-- 더 강력한 feature extraction
-- Parallel processing 가능
-- 작은 병변 확대 효과
-- Parameters: ~5M (정밀한 분할)
-
----
-
-## Loss Functions
-
-### Stage 1: Detection Loss (CenterNet Style)
-
-```python
-# 1. GT Generation (from segmentation label)
-batch_bboxes = extract_bboxes_from_label(gt_label)  # Connected components
-
-# 2. Generate Gaussian targets
-gt_heatmap = generate_gaussian_heatmap(bboxes)      # Gaussian at centers
-gt_size = extract_size_at_centers(bboxes)           # Size at center points
-gt_offset = extract_offset_at_centers(bboxes)       # Sub-pixel offset
-
-# 3. Loss computation (CenterNet)
-L_det = Focal(pred_heatmap, gt_heatmap) 
-      + 0.5 × L1(pred_size, gt_size)[positive_points]
-      + 0.1 × L1(pred_offset, gt_offset)[positive_points]
-```
-
-**핵심:**
-- ✅ **GT BBox**: Segmentation label → Connected components → Real bboxes
-- ✅ **Gaussian Heatmap**: 각 bbox center에 Gaussian 생성
-- ✅ **Positive Points**: GT center에서만 size/offset loss 계산
-- ✅ **Proper Training**: Size와 Offset이 실제 값 학습
-
-### Stage 2: Segmentation Loss
-
-```python
-L_seg = (1/N) Σᵢ [Dice(mask_i) + BCE(mask_i)]
-```
-
-- **핵심:** 각 RoI별 독립 계산
-- 1000px 병변 = 10px 병변 (동등한 가중치)
-
-### Total Loss
-
-```
-L_total = L_det + λ × L_seg
-```
-
-(λ = 1.0 또는 2.0)
-
----
-
-## Training Strategy
-
-### End-to-End 학습
-
-1. 전체 volume → Detection network → RoI proposals
-2. 각 RoI crop → Segmentation network → masks
-3. L_total로 역전파 → 두 stage 동시 최적화
-
-### 학습 팁
-
-- **HU windowing**: [0, 120] → [0, 1] (뇌출혈 최적화)
-- Detection threshold: train 0.3, inference 0.1
-- RoI sampling: positive + hard negative
-- Data augmentation: flip, rotate, scale
-- Mixed precision training
-
----
-
-## 핵심 장점
-
-✅ **강력한 Feature Extraction** - MONAI ResNet-style backbone with residual connections  
-✅ **작은 병변에 강함** - RoI별 독립 loss로 크기 편향 제거  
-✅ **메모리 효율적** - 전체 volume dense segmentation 불필요  
-✅ **전체 맥락 보존** - Patch 방식과 달리 global detection  
-✅ **정밀한 분할** - Enhanced U-Net (4-level + residual units)  
-✅ **해석 가능** - RoI + confidence + mask 출력  
-✅ **고속 학습** - Multi-GPU + fp16 지원
-
-## 성능 최적화
-
-### Mixed Precision (fp16)
-- **메모리 사용량 30-50% 감소** → 더 큰 배치 크기 가능
-- **학습 속도 2-3배 향상** (RTX 30xx, A100 등 Tensor Core 지원 GPU)
-- 정확도 손실 거의 없음
-
-### Multi-GPU
-- DataParallel로 모든 가용 GPU를 **training에** 자동 활용
-- Training 배치를 GPU들에 분산하여 처리
-- Validation은 메모리 안정성을 위해 single GPU 사용
-- 예: 4 GPU, batch_size=2 → training 총 배치 = 8
-
-**권장 설정:**
+## 🚀 Installation
 
 ```bash
-# 단일 GPU (16GB)
-python main.py --mode train --batch_size 2
+# Create conda environment
+conda create -n detseg3d python=3.10
+conda activate detseg3d
 
-# 단일 GPU (16GB) + fp16 → 더 큰 배치
-python main.py --mode train --batch_size 4 --fp16
+# Install PyTorch (adjust for your CUDA version)
+conda install pytorch torchvision pytorch-cuda=11.8 -c pytorch -c nvidia
 
-# 4x GPU (16GB each) + fp16
-python main.py --mode train \
-    --batch_size 2 \      # GPU당 2 → 총 8 (training)
-    --val_batch_size 4 \  # 4 (validation, single GPU)
-    --fp16 \
-    --multi_gpu
+# Install MONAI with detection support
+pip install "monai[all]"
+
+# Install other dependencies
+pip install scipy tensorboard tqdm
 ```
 
-**효과적인 배치 크기:**
-
-| GPU 구성 | batch_size | 총 배치 | 메모리/GPU | 학습 속도 |
-|---------|------------|---------|------------|----------|
-| 1 GPU | 2 | 2 | ~6GB | 1x |
-| 1 GPU + fp16 | 4 | 4 | ~6GB | 1x |
-| 4 GPU | 2 | **8** | ~6GB | **4x** |
-| 4 GPU + fp16 | 2 | **8** | ~4GB | **4x** |
-| 4 GPU + fp16 | 4 | **16** | ~8GB | **4x** |
-
-**Tip:**
-- Multi-GPU 사용 시 `--batch_size`는 **GPU 당 크기**로 설정 (training only)
-- Validation은 메모리 안정성을 위해 single GPU에서 실행됨
-- `--val_batch_size`를 더 크게 설정하여 validation 속도 향상 가능
-- fp16으로 메모리 절약 → batch_size 증가 가능
+**Requirements:**
+- Python ≥ 3.8
+- PyTorch ≥ 2.0
+- MONAI ≥ 1.3 (with detection module)
+- CUDA ≥ 11.0 (for GPU)
 
 ---
 
-## 프로젝트 구조
+## 📁 Data Preparation
+
+### Directory Structure
 
 ```
-DetSeg3D/
-├── main.py               # 메인 학습/테스트 코드 (all-in-one)
-├── inference_example.py  # 단일 이미지 추론 예제
-├── visualize.py          # 결과 시각화 도구
-├── requirements.txt      # 필요 패키지
-└── README.md
+your_data/
+├── images/
+│   ├── case001.nii.gz
+│   ├── case002.nii.gz
+│   └── ...
+└── labels/
+    ├── case001.nii.gz  (binary segmentation mask)
+    ├── case002.nii.gz
+    └── ...
 ```
 
-## 설치
+### Label Format
+
+- **Segmentation masks**: Binary or multi-class (H, W, D)
+- **Automatic box extraction**: Connected components → bounding boxes
+- **Coordinate system**: Image coordinates (handled automatically)
+
+**No manual box annotation needed!** The code automatically extracts bounding boxes from segmentation masks.
+
+---
+
+## 🏋️ Training
+
+### Basic Training
 
 ```bash
-pip install -r requirements.txt
-```
-
-## 사용법
-
-### 학습
-
-```bash
-python main.py --mode train \
-    --image_dir /path/to/train/images \
-    --label_dir /path/to/train/labels \
+python nndet_simple.py --mode train \
+    --image_dir /path/to/images \
+    --label_dir /path/to/labels \
     --output_dir ./outputs \
-    --epochs 100 \
+    --batch_size 1 \
+    --epochs 100
+```
+
+### Multi-GPU Training (Recommended - DDP with torchrun)
+
+```bash
+# Use torchrun for efficient DistributedDataParallel training
+# --batch_size is PER GPU (total = batch_size × num_gpus)
+torchrun --nproc_per_node=4 nndet_simple.py \
+    --mode train \
+    --image_dir /path/to/images \
+    --label_dir /path/to/labels \
+    --output_dir ./outputs \
+    --batch_size 1 \
+    --epochs 100
+```
+
+**Benefits of torchrun + DDP:**
+- ✅ **All GPUs fully utilized** (unlike DataParallel which underutilizes)
+- ✅ **Faster training**: Each GPU runs an independent process
+- ✅ **Better gradient sync**: Efficient all-reduce operations
+- ✅ **Simple scaling**: Just change `--nproc_per_node`
+
+**Example:** 4 GPUs × `--batch_size 1` = **effective batch size of 4**
+
+### Advanced Options
+
+```bash
+python nndet_simple.py --mode train \
+    --image_dir /path/to/images \
+    --label_dir /path/to/labels \
+    --output_dir ./outputs \
     --batch_size 2 \
-    --val_split 0.2
+    --patch_size 192 192 80 \
+    --val_patch_size 512 512 208 \
+    --lr 1e-2 \
+    --num_classes 1 \
+    --multi_gpu \
+    --amp \
+    --val_interval 5 \
+    --epochs 100
 ```
 
-**고급 옵션 (성능 향상):**
+### Key Arguments
 
-```bash
-# Mixed precision (fp16) + Multi-GPU (4 GPUs)
-python main.py --mode train \
-    --image_dir /path/to/train/images \
-    --label_dir /path/to/train/labels \
-    --epochs 100 \
-    --batch_size 2 \
-    --val_batch_size 4 \
-    --fp16 \
-    --multi_gpu
+| Argument | Default | Description |
+|----------|---------|-------------|
+| `--image_dir` | **required** | Path to image directory |
+| `--label_dir` | **required** | Path to label directory |
+| `--output_dir` | `./outputs_detection` | Output directory for models and logs |
+| `--batch_size` | `1` | Batch size **per GPU** |
+| `--patch_size` | `[192,192,80]` | Training patch size (D,H,W) |
+| `--val_patch_size` | `[512,512,208]` | Validation patch size |
+| `--lr` | `1e-2` | Learning rate |
+| `--num_classes` | `1` | Number of foreground classes |
+| `--multi_gpu` | `False` | (Deprecated) Use `torchrun` instead for DDP |
+| `--amp` | `True` | Use automatic mixed precision |
+| `--val_interval` | `5` | Validation every N epochs |
+| `--epochs` | `100` | Total epochs |
+
+---
+
+## 📊 Validation & Metrics
+
+The code automatically evaluates using **COCO metrics**:
+
+- **mAP (mean Average Precision)**: IoU thresholds [0.1, 0.3, 0.5]
+- **mAR (mean Average Recall)**: Max detections = 100
+- **Per-class metrics**: If multiple classes
+
+Example output:
+```
+Validation Results:
+  mAP: 0.8543
+  mAP@0.1: 0.9234
+  mAP@0.3: 0.8765
+  mAP@0.5: 0.7631
+  mAR: 0.8912
 ```
 
-**설정 해석:**
-- `--batch_size 2`: **GPU 당** training 배치 크기
-- 4 GPU 사용 시 → 실제 총 training 배치: 2 × 4 = **8**
-- `--val_batch_size 4`: validation 배치 크기 (single GPU 사용)
+---
 
-**기타 옵션:**
-- 이미지/레이블 폴더를 지정하면 자동으로 80/20 train/val split
-- `.nii`, `.nii.gz`, `.npy` 형식 지원
-- **자동 HU windowing**: 입력 이미지를 [0, 120] HU로 클리핑 후 [0, 1]로 정규화
-- `--fp16`: Mixed precision training (메모리 절약 + 속도 향상)
-- `--multi_gpu`: 모든 가용 GPU를 training에 사용 (validation은 메모리 안정성을 위해 single GPU)
+## 🧪 Inference
 
-### 테스트
+Coming soon! Will include:
+- Sliding window inference for large volumes
+- Box NMS with configurable threshold
+- World coordinate conversion
+- JSON/CSV export
+- Visualization
 
-```bash
-python main.py --mode test \
-    --test_image_dir /path/to/test/images \
-    --test_label_dir /path/to/test/labels \
-    --output_dir ./outputs
-```
+---
 
-- 원본 이미지 크기로 재구성된 전체 segmentation 저장
-- 각 샘플별 Dice score 계산
-- RoI 정보 및 confidence 저장
-- 결과는 `outputs/predictions/` 폴더에 `.npy` 형식으로 저장
+## 🔬 Data Augmentation
 
-### 단일 이미지 추론
+The training pipeline includes comprehensive augmentation:
 
-```bash
-python inference_example.py \
-    --model ./outputs/best_model.pth \
-    --image /path/to/image.npy \
-    --output prediction.npy
-```
+**Spatial:**
+- Random zoom (0.8-1.2)
+- Random flip (3 axes, prob=0.5 each)
+- Random 90° rotation (prob=0.5)
 
-### 결과 시각화
+**Intensity:**
+- Gaussian noise (prob=0.1)
+- Gaussian smooth (prob=0.1)
+- Scale intensity (prob=0.15)
+- Shift intensity (prob=0.15)
+- Adjust contrast (prob=0.3, gamma=0.7-1.5)
 
-```bash
-python visualize.py \
-    --image /path/to/image.npy \
-    --label /path/to/label.npy \
-    --pred ./outputs/predictions/pred_0000.npy \
-    --output result.png
-```
+**Box handling:**
+- Boxes are converted to points before augmentation
+- Same transforms applied to images and points
+- Points converted back to boxes
+- Invalid boxes (outside image) are removed
 
-## 핵심 기능
+---
 
-### Adaptive RoI Processing ⭐ **NEW!**
+## 🎛️ Hyperparameters
 
-**작은 병변 검출에 최적화된 Adaptive ROI 처리:**
-
-| 병변 크기 | 처리 방법 | 해상도 보존 | 장점 |
-|----------|----------|-----------|------|
-| 작음 (< 64 voxels) | **원본 크기 유지** | **100%** ✅ | 디테일 손실 없음 |
-| 중간 (64-128) | **원본 크기 유지** | **100%** ✅ | 정확한 경계 |
-| 큼 (> 128) | Aspect ratio 유지하며 축소 | ~70% | 메모리 효율 |
-
-**핵심 특징:**
-- ✅ **Anisotropic 이미지 지원**: (160, 160, 16) → 비율 유지
-- ✅ **작은 병변 해상도 완전 보존**: 정보 손실 0%
-- ✅ **메모리 효율**: 같은 크기끼리 배치 처리
-- ✅ **유연성**: 모든 병변 크기에 대응
-
-### RoI → Full Segmentation 재구성
-
-Stage 1에서 추출된 각 RoI의 segmentation 결과를 원본 이미지 크기로 복원:
-
-1. **Detection**: 전체 볼륨에서 RoI 탐지 (좌표 + confidence)
-2. **Adaptive Segmentation**: 각 RoI를 **원본 크기 또는 비율 유지하며 resize**
-3. **Reconstruction**: 분할된 RoI를 원래 크기로 복원하여 원본 볼륨에 배치
-4. **Merge**: 겹치는 영역은 평균값으로 처리
+### Model Architecture
 
 ```python
-# 코드 예시
-outputs = model(image, mode='test')
-full_seg = outputs['full_segmentation']  # 원본 크기
-roi_info = outputs['roi_info']            # RoI 정보 (bbox, confidence)
+# Anchor shapes (adjust for your lesion sizes)
+base_anchor_shapes = [[6,8,4], [8,6,5], [10,10,6]]
+
+# FPN returned layers (lower = higher resolution for small lesions)
+returned_layers = [1, 2]  # Use layers 1 and 2
+
+# ResNet stride configuration
+conv1_t_stride = [2, 2, 1]  # Less downsampling in Z for medical images
 ```
 
-## 구현 상태
+### Training Configuration
 
-✅ **CenterNet-style Detection** ⭐ (Proper bbox regression with Gaussian heatmap)  
-✅ **Enhanced Detection network** (MONAI ResNet-style backbone)  
-✅ **Enhanced Segmentation network** (Deeper U-Net with residual units)  
-✅ **Adaptive RoI Processing** ⭐ (작은 병변 해상도 100% 보존)  
-✅ **GT BBox extraction** (Connected components from segmentation labels)  
-✅ End-to-end pipeline  
-✅ Data loading (auto train/val split)  
-✅ **RoI → Full segmentation 재구성**  
-✅ **Evaluation metrics (Dice score)**  
-✅ **결과 저장 및 시각화**  
-✅ **Multi-GPU support** (DataParallel)  
-✅ **Mixed precision training** (fp16)
+```python
+# ATSS matcher
+num_candidates = 4          # Number of candidate anchors per GT
+center_in_gt = False        # Relaxed matching for small objects
 
----
+# Hard negative sampler
+batch_size_per_image = 64   # Samples per image
+positive_fraction = 0.3     # 30% positive, 70% negative
+pool_size = 20
+min_neg = 16
 
-## 빠른 시작 가이드
-
-### 1. 환경 설정
-
-```bash
-git clone <repository>
-cd DetSeg3D
-pip install -r requirements.txt
+# NMS parameters
+score_thresh = 0.02         # Confidence threshold
+nms_thresh = 0.22           # IoU threshold for NMS
+detections_per_img = 100    # Max detections per image
 ```
 
-### 2. 데이터 준비
+### Optimizer & Scheduler
 
-데이터를 다음과 같은 구조로 준비:
+```python
+# SGD with momentum
+optimizer = torch.optim.SGD(
+    params,
+    lr=1e-2,
+    momentum=0.9,
+    weight_decay=3e-5,
+    nesterov=True
+)
 
-```
-data/
-├── train/
-│   ├── images/
-│   │   ├── case001.npy
-│   │   ├── case002.npy
-│   │   └── ...
-│   └── labels/
-│       ├── case001.npy
-│       ├── case002.npy
-│       └── ...
-└── test/
-    ├── images/
-    └── labels/
-```
-
-### 3. 학습
-
-```bash
-# 단일 GPU
-python main.py --mode train \
-    --image_dir ./data/train/images \
-    --label_dir ./data/train/labels \
-    --epochs 100 \
-    --batch_size 2
-
-# Multi-GPU (4 GPU 예시)
-python main.py --mode train \
-    --image_dir ./data/train/images \
-    --label_dir ./data/train/labels \
-    --epochs 100 \
-    --batch_size 2 \  # GPU당 2개 → 총 8
-    --fp16 \
-    --multi_gpu
-```
-
-### 4. 테스트
-
-```bash
-python main.py --mode test \
-    --test_image_dir ./data/test/images \
-    --test_label_dir ./data/test/labels
-```
-
-### 5. 결과 확인
-
-```bash
-# 예측 결과는 ./outputs/predictions/ 에 저장됨
-ls ./outputs/predictions/
-
-# 시각화
-python visualize.py \
-    --image ./data/test/images/case001.npy \
-    --label ./data/test/labels/case001.npy \
-    --pred ./outputs/predictions/pred_0000.npy \
-    --output result.png
+# Step LR scheduler
+scheduler = torch.optim.lr_scheduler.StepLR(
+    optimizer,
+    step_size=50,
+    gamma=0.1
+)
 ```
 
 ---
 
-## 주요 하이퍼파라미터
+## 📈 Monitoring
 
-| 파라미터 | 기본값 | 설명 |
-|---------|--------|------|
-| `--epochs` | 100 | 학습 에포크 수 |
-| `--batch_size` | 2 | **GPU 당** training 배치 크기 |
-| `--val_batch_size` | None | validation 배치 크기 (single GPU, None이면 batch_size와 동일) |
-| `--lr` | 1e-4 | Learning rate |
-| `--roi_size` | 32 | RoI 크기 (32³) |
-| `--val_split` | 0.2 | 검증 데이터 비율 |
-| `--fp16` | False | Mixed precision (fp16) 사용 |
-| `--multi_gpu` | False | 모든 가용 GPU를 training에 사용 (validation은 single GPU) |
-| `--max_rois` | 64 | 이미지당 최대 RoI 개수 (OOM 방지) |
-| `--val_threshold` | 0.1 | Validation/Test용 detection threshold |
-| `--roi_batch_size` | 8 | RoI segmentation 처리 시 mini-batch 크기 (OOM 방지) |
-| `--val_interval` | 1 | Validation 실행 간격 (epoch 단위) |
-| `--small_roi_threshold` | 64 | 이 크기보다 작은 RoI는 원본 크기 유지 (작은 병변 해상도 보존) |
-| `--max_roi_size` | 128 | 큰 RoI의 최대 크기 (aspect ratio 유지하며 resize) |
-
-**Multi-GPU 사용 시:**
-- 실제 총 training 배치 크기 = `batch_size × GPU 개수`
-- 예: `--batch_size 2 --multi_gpu` (4 GPU) → 총 8 samples/batch
-
-**OOM (Out of Memory) 문제 해결:**
-
-**문제:** Validation 시 GPU 0번만 메모리를 과도하게 사용 (48GB/49GB)
-
-Validation은 single GPU (GPU 0)에서 실행되므로, 다음 파라미터로 메모리를 조절하세요:
-
-1. **`--max_rois`를 줄이기** (기본값: 100)
-   ```bash
-   --max_rois 50  # 이미지당 최대 50개 RoI만 처리
-   ```
-
-2. **`--val_threshold`를 높이기** (기본값: 0.1)
-   ```bash
-   --val_threshold 0.3  # Confidence가 높은 RoI만 선택
-   ```
-
-3. **`--roi_batch_size`를 줄이기** (기본값: 32)
-   ```bash
-   --roi_batch_size 16  # RoI를 16개씩 처리
-   ```
-
-4. **`--val_interval`로 validation 빈도 줄이기** (기본값: 1)
-   ```bash
-   --val_interval 5  # 5 epoch마다 validation 실행
-   ```
-
-**권장 조합 (GPU 메모리 부족 시):**
+**TensorBoard:**
 ```bash
-# 방법 1: 파라미터 조정 (정확도 유지)
-python main.py --mode train \
-    --max_rois 50 \
-    --val_threshold 0.3 \
-    --roi_batch_size 16 \
-    --batch_size 1 \
-    --fp16 --multi_gpu
-
-# 방법 2: Validation 빈도 줄이기 (빠른 학습)
-python main.py --mode train \
-    --val_interval 5 \
-    --batch_size 1 \
-    --fp16 --multi_gpu
+tensorboard --logdir outputs_detection/tensorboard
 ```
 
-**효과:**
-- GPU 0 메모리: 48GB → ~25GB
-- Training 속도: 영향 없음
-- Validation 속도: 더 빠름
+**Metrics tracked:**
+- Training: total loss, classification loss, box regression loss, learning rate
+- Validation: mAP, mAR (at various IoU thresholds)
+
+---
+
+## 🗂️ Outputs
+
+```
+outputs_detection/
+├── best_model.pth              # Best model by mAP
+├── checkpoint_epoch10.pth      # Checkpoints every 10 epochs
+├── checkpoint_epoch20.pth
+├── ...
+└── tensorboard/                # TensorBoard logs
+    └── events.out.tfevents.*
+```
+
+**Model checkpoint contains:**
+- `model_state_dict`: Network weights
+- `optimizer_state_dict`: Optimizer state
+- `epoch`: Epoch number
+- `best_metric`: Best mAP score (for best_model.pth)
+
+---
+
+## 🎓 Reference
+
+This implementation is based on:
+
+**MONAI Detection Module:**
+- [MONAI Detection Tutorial](https://github.com/Project-MONAI/tutorials/tree/main/detection)
+- [MONAI Documentation](https://docs.monai.io/)
+
+**Papers:**
+- **RetinaNet:** [Focal Loss for Dense Object Detection](https://arxiv.org/abs/1708.02002) (Lin et al., ICCV 2017)
+- **ATSS:** [Bridging the Gap Between Anchor-based and Anchor-free Detection](https://arxiv.org/abs/1912.02424) (Zhang et al., CVPR 2020)
+- **nnDetection:** [A Self-Configuring Method for Medical Object Detection](https://arxiv.org/abs/2106.00817) (Baumgartner et al., MICCAI 2021)
+
+---
+
+## 🤝 Acknowledgements
+
+- **MONAI Team** for the excellent detection module
+- **nnDetection** for design insights and best practices
+- **LUNA16 Challenge** for evaluation methodology
+
+---
+
+## 📝 Citation
+
+If you use this code, please cite MONAI and the relevant papers:
+
+```bibtex
+@article{cardoso2022monai,
+  title={MONAI: An open-source framework for deep learning in healthcare},
+  author={Cardoso, M Jorge and others},
+  journal={arXiv preprint arXiv:2211.02701},
+  year={2022}
+}
+
+@inproceedings{lin2017focal,
+  title={Focal loss for dense object detection},
+  author={Lin, Tsung-Yi and Goyal, Priya and Girshick, Ross and He, Kaiming and Doll{\'a}r, Piotr},
+  booktitle={ICCV},
+  year={2017}
+}
+```
+
+---
+
+## 📄 License
+
+This project is licensed under the Apache License 2.0 (same as MONAI).
+
+---
+
+## 🐛 Troubleshooting
+
+### Out of Memory (OOM)
+
+**Solution 1:** Reduce patch size
+```bash
+--patch_size 128 128 64  # Smaller patches
+```
+
+**Solution 2:** Reduce batch size
+```bash
+--batch_size 1  # Already minimal
+```
+
+**Solution 3:** Disable AMP (if causing issues)
+```bash
+--no-amp  # Use FP32 instead of FP16
+```
+
+### No boxes detected from labels
+
+**Check 1:** Verify label format (binary mask, 0=background, 1=foreground)
+
+**Check 2:** Adjust minimum size threshold
+```python
+# In GenerateBoxMaskd class
+min_size = 5  # Reduce from 10
+```
+
+### Low mAP scores
+
+**Solution 1:** Adjust anchor shapes for your lesion sizes
+```python
+base_anchor_shapes = [[4,4,2], [6,6,3], [8,8,4]]  # Smaller for tiny lesions
+```
+
+**Solution 2:** Use more FPN layers
+```python
+returned_layers = [0, 1, 2]  # Include layer 0 (highest resolution)
+```
+
+**Solution 3:** Train longer
+```bash
+--epochs 200  # More epochs for convergence
+```
+
+---
+
+## 🔮 Future Work
+
+- [ ] Test-time augmentation (TTA)
+- [ ] Ensemble inference
+- [ ] Segmentation refinement (Stage 2)
+- [ ] 3D visualization tools
+- [ ] FROC curve evaluation
+- [ ] Cross-validation support
+- [x] DistributedDataParallel (DDP) for multi-GPU training (`torchrun` support)
+
+---
+
+**Happy detecting! 🎯**
