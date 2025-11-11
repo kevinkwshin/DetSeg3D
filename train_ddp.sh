@@ -1,18 +1,27 @@
 #!/bin/bash
 
-# DetSeg3D Multi-GPU Training Script
-# Usage: bash test_ddp.sh
+# ============================================================================
+# 3D Detection: Multi-GPU Training with DDP
+# ============================================================================
+# Reads all parameters from config.yaml and runs training with DDP
+# To modify settings (epochs, batch_size, lr, etc.), edit config.yaml
+# ============================================================================
 
-echo "🚀 Starting training with torchrun..."
+echo "🚀 Starting multi-GPU training with torchrun..."
+echo ""
 
-torchrun --nproc_per_node=4 nndet_simple.py \
-    --mode train \
-    --image_dir /mnt/nas206/ANO_DET/GAN_brain/NeuroCAD_preprocessing/1.Asan_data/Asan/AMC_train/hemo/image \
-    --label_dir /mnt/nas206/ANO_DET/GAN_brain/NeuroCAD_preprocessing/1.Asan_data/Asan/AMC_train/hemo/mask \
-    --batch_size 2 \
-    --epochs 1000 \
-    --num_classes 1 \
-    --backbone resnet50
-# NOTE: EfficientNetBN-B3는 resnet_fpn_feature_extractor와 호환되지 않음
-# 사용하려면 커스텀 FPN 구현 필요 
+# Run training with 4 GPUs (adjust --nproc_per_node for your setup)
+torchrun --nproc_per_node=4 nndet_simple.py --mode train
+
+# For custom config file:
+# torchrun --nproc_per_node=4 nndet_simple.py --mode train --config my_config.yaml
+
+echo ""
+echo "============================================================"
+echo "Training Notes:"
+echo "  - All parameters loaded from config.yaml"
+echo "  - Effective batch size = per_gpu_batch × num_samples × num_gpus"
+echo "  - SyncBatchNorm automatically enabled for multi-GPU"
+echo "  - Best model saved to: ./outputs_detection/best_model_<backbone>.pth"
+echo "============================================================"
 

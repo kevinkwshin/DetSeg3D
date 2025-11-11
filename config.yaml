@@ -1,0 +1,119 @@
+# ============================================================================
+# DetSeg3D Configuration File
+# ============================================================================
+# This file contains all parameters for training, validation, and testing.
+# Both nndet_simple.py and optimize_anchors.py read from this file.
+# ============================================================================
+
+# Dataset Paths
+data:
+  # Training data
+  image_dir: "/mnt/nas206/ANO_DET/GAN_brain/NeuroCAD_preprocessing/1.Asan_data/Asan/AMC_train/hemo/image"
+  label_dir: "/mnt/nas206/ANO_DET/GAN_brain/NeuroCAD_preprocessing/1.Asan_data/Asan/AMC_train/hemo/mask"
+  output_dir: "./outputs_detection"
+  
+  # Test/Inference data (optional - defaults to training data if not specified)
+  test_image_dir: null  # Set path for test images, e.g., "/path/to/test/images"
+  test_label_dir: null  # Optional: Set path for test labels (for evaluation)
+  
+  # Voxel Spacing (in mm)
+  # If null, spacing will be automatically read from NIfTI headers
+  # If specified, this spacing will be used for all images (useful for uniform datasets)
+  spacing: null  # [x, y, z] e.g., [0.43, 0.43, 4.8] for typical brain CT
+
+# Model Architecture
+model:
+  backbone: "resnet101"  # Options: resnet50, resnet101
+  num_classes: 1  # Number of foreground classes (excluding background)
+
+# Anchor Optimization
+anchor:
+  min_size: 10  # Minimum lesion volume in voxels (3D cluster)
+  merge_distance_mm: 10.0  # Merge lesions within this distance (mm). Set to 0 to disable
+  feature_stride: 2  # Feature map stride for anchor scaling (2 or 4)
+  find_optimal_k: true  # Auto-find optimal number of anchors
+  num_anchors: null  # Manual specification (null = auto)
+  save_samples: true  # Save sample cases for visualization
+  num_samples: 5  # Number of sample cases to save
+
+# Training Hyperparameters
+training:
+  epochs: 1000
+  batch_size: 1  # Batch size per GPU
+  lr: 0.005  # Initial learning rate (5e-3)
+  
+  # Training patch size [W, H, D]
+  # NOTE: This is a FALLBACK value. If you run 'bash run_optimize_anchors.sh',
+  #       the optimized patch_size will be automatically loaded from 
+  #       ./eda/optimized_anchors.json and override this value.
+  # 💡 Recommended workflow:
+  #    1. Run: bash run_optimize_anchors.sh (analyzes your dataset)
+  #    2. Run: bash train_ddp.sh (uses optimized values automatically)
+  patch_size: [256, 256, 24]
+  
+  val_interval: 10  # Validation every N epochs
+  gradient_accumulation_steps: 1
+  
+  # Optimizer
+  optimizer:
+    momentum: 0.9
+    weight_decay: 0.0003  # 3e-5
+    nesterov: true
+  
+  # Scheduler
+  scheduler:
+    warmup_epochs: 5
+    step_size: 50
+    gamma: 0.1
+
+# Detection Parameters
+detection:
+  # Training/Validation
+  score_thresh_train: 0.2
+  nms_thresh_train: 0.2
+  detections_per_img_train: 10
+  topk_candidates_per_level_train: 1000
+  
+  # Testing/Inference
+  score_thresh_test: 0.3  # Min confidence: 0.2 (more detections) ↔ 0.4 (higher precision)
+  nms_thresh_test: 0.22
+  detections_per_img_test: 10  # Max detections: 10-20 recommended (top-N only)
+  topk_candidates_per_level_test: 100
+  
+  # Checkpoint (optional - auto-determined if null)
+  # Format: ./outputs_detection/best_model_{backbone}.pth
+  checkpoint: null
+
+# Data Augmentation
+augmentation:
+  # CT HU Intensity Scaling
+  intensity_min: 0
+  intensity_max: 120
+  
+  # Spatial
+  zoom_min: 0.9
+  zoom_max: 1.1
+  zoom_prob: 0.1
+  flip_prob: 0.1
+  rotate90_prob: 0.1
+  
+  # Noise & Contrast
+  gaussian_noise_std: 0.1
+  gaussian_noise_prob: 0.1
+  gaussian_smooth_prob: 0.1
+  scale_intensity_prob: 0.1
+  shift_intensity_prob: 0.1
+  adjust_contrast_prob: 0.1
+
+# Hardware
+hardware:
+  use_amp: true  # Automatic Mixed Precision
+  multi_gpu: false  # Enable DDP (use torchrun)
+  num_workers: 4  # DataLoader workers
+
+# Output
+output:
+  save_predictions: true  # Save test predictions to JSON
+  save_nifti: true  # Save predicted boxes as NIfTI masks
+  debug: true  # Enable debug output for bbox extraction
+

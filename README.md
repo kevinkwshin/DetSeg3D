@@ -1,454 +1,362 @@
-# DetSeg3D: 3D Medical Lesion Detection
+# 3D Detection with MONAI RetinaNet
 
-Professional 3D object detection for medical imaging based on **MONAI RetinaNet**.
-
----
-
-## 🎯 Overview
-
-This project implements state-of-the-art **3D RetinaNet** for medical lesion detection using the **MONAI detection module**.
-
-**Key Features:**
-- ✅ **MONAI RetinaNet**: Production-ready 3D detection
-- ✅ **ResNet50 + FPN backbone**: Multi-scale feature extraction
-- ✅ **ATSS Matcher**: Adaptive Training Sample Selection
-- ✅ **Anchor-based detection**: Proven robust performance
-- ✅ **Auto segmentation-to-box conversion**: Works with segmentation labels
-- ✅ **Multi-GPU support**: DistributedDataParallel (DDP) training with `torchrun`
-- ✅ **AMP (Mixed Precision)**: Faster training with FP16
-- ✅ **Sliding window inference**: Handles large images
-- ✅ **COCO metrics**: Standard evaluation (mAP, mAR)
+Simple, function-based 3D object detection for medical images using MONAI RetinaNet.
 
 ---
 
-## 📐 Architecture
-
-```
-Input (1, D, H, W)
-    ↓
-ResNet50 Backbone
-    ↓
-Feature Pyramid Network (FPN)
-    ├─ P3 (stride=8)
-    ├─ P4 (stride=16)
-    └─ P5 (stride=32)
-    ↓
-RetinaNet Heads
-    ├─ Classification Head (Focal Loss)
-    └─ Box Regression Head (L1 Loss)
-    ↓
-ATSS Matcher + Hard Negative Mining
-    ↓
-NMS (Non-Maximum Suppression)
-    ↓
-Output: Boxes + Confidence Scores
-```
-
-### Components
-
-#### 1. **Backbone: ResNet50**
-- Pre-downsampling with stride [2,2,1] for 3D medical images
-- Residual blocks: [3, 4, 6, 3] (ResNet50)
-- Output features from layer 1 and 2 for small lesion detection
-
-#### 2. **Feature Pyramid Network (FPN)**
-- Multi-scale features for detecting lesions of various sizes
-- Top-down pathway with lateral connections
-- Feature map scales: [1, 2, 4]
-
-#### 3. **RetinaNet Detection Heads**
-- **Classification head**: Focal loss for class imbalance
-- **Box regression head**: Smooth L1 loss
-- Anchors: Multiple aspect ratios per location
-
-#### 4. **ATSS Matcher**
-- Adaptive Training Sample Selection
-- Automatically determines positive/negative samples
-- Better than IoU-based matching for small objects
-
-#### 5. **Hard Negative Mining**
-- Balances positive/negative samples (ratio: 0.3)
-- Focuses on hard negatives
-- Reduces false positives
-
----
-
-## 🚀 Installation
+## 🚀 Quick Start
 
 ```bash
-# Create conda environment
-conda create -n detseg3d python=3.10
-conda activate detseg3d
+# 1. Optimize anchors + patch sizes (recommended, run once)
+bash run_optimize_anchors.sh
+# → Saves optimized_anchors.json with:
+#   - anchor_shapes (for RetinaNet)
+#   - train_patch_size (auto-loaded during training)
 
-# Install PyTorch (adjust for your CUDA version)
-conda install pytorch torchvision pytorch-cuda=11.8 -c pytorch -c nvidia
+# 2. Train (automatically uses optimized values from step 1)
+bash train_ddp.sh
 
-# Install MONAI with detection support
-pip install "monai[all]"
-
-# Install other dependencies
-pip install scipy tensorboard tqdm
+# 3. Test
+bash test.sh
 ```
-
-**Requirements:**
-- Python ≥ 3.8
-- PyTorch ≥ 2.0
-- MONAI ≥ 1.3 (with detection module)
-- CUDA ≥ 11.0 (for GPU)
 
 ---
 
-## 📁 Data Preparation
+## ⚙️ Configuration (`config.yaml`)
 
-### Directory Structure
+All parameters are managed in `config.yaml`:
 
+```yaml
+data:
+  image_dir: "/path/to/images"
+  label_dir: "/path/to/labels"
+
+model:
+  backbone: "resnet101"  # resnet50 or resnet101
+
+training:
+  epochs: 1000
+  batch_size: 1
+  lr: 0.005
+  patch_size: [256, 256, 24]
 ```
-your_data/
-├── images/
-│   ├── case001.nii.gz
-│   ├── case002.nii.gz
-│   └── ...
-└── labels/
-    ├── case001.nii.gz  (binary segmentation mask)
-    ├── case002.nii.gz
-    └── ...
+
+**Priority**: CLI args > `config.yaml` > defaults
+
+**Override example**:
+```bash
+python nndet_simple.py --mode train --batch_size 2  # Override config
 ```
-
-### Label Format
-
-- **Segmentation masks**: Binary or multi-class (H, W, D)
-- **Automatic box extraction**: Connected components → bounding boxes
-- **Coordinate system**: Image coordinates (handled automatically)
-
-**No manual box annotation needed!** The code automatically extracts bounding boxes from segmentation masks.
 
 ---
 
-## 🏋️ Training
+## ✨ Features
 
-### Basic Training
+- **Unified config**: Central `config.yaml` for all parameters
+- **Self-contained**: Single file (`nndet_simple.py`), function-based
+- **Multi-GPU**: DDP with `torchrun`, SyncBatchNorm
+- **Auto-resume**: Loads `best_model_{backbone}.pth` if exists
+- **Anchor optimization**: K-Means clustering (YOLO-style) + **auto patch size recommendation**
+- **Smart loading**: Automatically uses optimized anchors & patch sizes from EDA
+- **Backbones**: ResNet50, ResNet101
+- **Smart cropping**: `RandCropByPosNegLabeld` (50% lesions, 50% background)
+- **Debug mode**: Saves validation samples as NIfTI
+- **Config verification**: Auto-checks checkpoint compatibility during test
+- **NIfTI export**: Save predictions as masks for visualization
+
+---
+
+## 📦 Installation
 
 ```bash
-python nndet_simple.py --mode train \
-    --image_dir /path/to/images \
-    --label_dir /path/to/labels \
-    --output_dir ./outputs \
-    --batch_size 1 \
-    --epochs 100
+pip install torch monai nibabel scikit-learn matplotlib tqdm tensorboard pyyaml
 ```
 
-### Multi-GPU Training (Recommended - DDP with torchrun)
+---
+
+## 🎯 Usage
+
+### **1️⃣ Configure (`config.yaml`)**
+
+Edit `config.yaml` to set all parameters:
+
+```yaml
+data:
+  image_dir: "/path/to/train/images"
+  label_dir: "/path/to/train/labels"
+  test_image_dir: "/path/to/test/images"  # For inference
+
+model:
+  backbone: "resnet50"  # or "resnet101"
+  num_classes: 1
+
+training:
+  epochs: 1000
+  batch_size: 1  # per GPU
+  lr: 0.005
+  patch_size: [256, 256, 24]  # Fallback (auto-optimized if you run step 0)
+
+detection:
+  score_thresh_test: 0.3  # Min confidence (0.2-0.4)
+  detections_per_img_test: 10  # Max detections (10-20)
+```
+
+**Note:** `patch_size` in config.yaml is a fallback value. If you run anchor optimization (step 0), the recommended patch size will be automatically loaded from `./eda/optimized_anchors.json`.
+
+---
+
+### **0️⃣ Optimize (Optional but Recommended)**
+
+Run this **once** before training to optimize anchor shapes and patch sizes for your dataset:
 
 ```bash
-# Use torchrun for efficient DistributedDataParallel training
-# --batch_size is PER GPU (total = batch_size × num_gpus)
-torchrun --nproc_per_node=4 nndet_simple.py \
-    --mode train \
-    --image_dir /path/to/images \
-    --label_dir /path/to/labels \
-    --output_dir ./outputs \
-    --batch_size 1 \
-    --epochs 100
+bash run_optimize_anchors.sh
 ```
 
-**Benefits of torchrun + DDP:**
-- ✅ **All GPUs fully utilized** (unlike DataParallel which underutilizes)
-- ✅ **Faster training**: Each GPU runs an independent process
-- ✅ **Better gradient sync**: Efficient all-reduce operations
-- ✅ **Simple scaling**: Just change `--nproc_per_node`
+**Output:** `./eda/optimized_anchors.json`
+- ✅ Optimized anchor shapes (for RetinaNet)
+- ✅ Recommended patch size (auto-loaded during training)
+- ✅ Dataset statistics (image/lesion sizes)
 
-**Example:** 4 GPUs × `--batch_size 1` = **effective batch size of 4**
+**What happens:**
+- Analyzes your dataset (image sizes, lesion sizes)
+- Uses K-Means to find optimal anchor shapes
+- Calculates optimal patch_size based on lesion distribution
+- Saves everything to `optimized_anchors.json`
 
-### Advanced Options
+**When training:**
+- Training script **automatically** loads these optimized values
+- No need to manually edit `config.yaml`!
+
+---
+
+### **2️⃣ Train**
 
 ```bash
-python nndet_simple.py --mode train \
-    --image_dir /path/to/images \
-    --label_dir /path/to/labels \
-    --output_dir ./outputs \
-    --batch_size 2 \
-    --patch_size 192 192 80 \
-    --val_patch_size 512 512 208 \
-    --lr 1e-2 \
-    --num_classes 1 \
-    --multi_gpu \
-    --amp \
-    --val_interval 5 \
-    --epochs 100
+# Single GPU
+python3 nndet_simple.py
+
+# Multi-GPU (4 GPUs with DDP)
+bash train_ddp.sh
+# or
+torchrun --nproc_per_node=4 nndet_simple.py
 ```
 
-### Key Arguments
+**Training automatically:**
+- ✅ Loads **optimized anchor shapes** from `./eda/optimized_anchors.json` (if exists)
+- ✅ Loads **optimized patch_size** from `./eda/optimized_anchors.json` (if exists)
+- ✅ Saves best model to `./outputs_detection/best_model_{backbone}.pth`
+- ✅ Uses SyncBatchNorm for multi-GPU training
+- ✅ Logs to TensorBoard: `./outputs_detection/tensorboard/`
 
-| Argument | Default | Description |
-|----------|---------|-------------|
-| `--image_dir` | **required** | Path to image directory |
-| `--label_dir` | **required** | Path to label directory |
-| `--output_dir` | `./outputs_detection` | Output directory for models and logs |
-| `--batch_size` | `1` | Batch size **per GPU** |
-| `--patch_size` | `[192,192,80]` | Training patch size (D,H,W) |
-| `--val_patch_size` | `[512,512,208]` | Validation patch size |
-| `--lr` | `1e-2` | Learning rate |
-| `--num_classes` | `1` | Number of foreground classes |
-| `--multi_gpu` | `False` | (Deprecated) Use `torchrun` instead for DDP |
-| `--amp` | `True` | Use automatic mixed precision |
-| `--val_interval` | `5` | Validation every N epochs |
-| `--epochs` | `100` | Total epochs |
+**💡 If optimization was not run:**
+- Falls back to `config.yaml` values
+- Still works, but may be suboptimal for your dataset
 
 ---
 
-## 📊 Validation & Metrics
+### **3️⃣ Test/Inference**
 
-The code automatically evaluates using **COCO metrics**:
-
-- **mAP (mean Average Precision)**: IoU thresholds [0.1, 0.3, 0.5]
-- **mAR (mean Average Recall)**: Max detections = 100
-- **Per-class metrics**: If multiple classes
-
-Example output:
-```
-Validation Results:
-  mAP: 0.8543
-  mAP@0.1: 0.9234
-  mAP@0.3: 0.8765
-  mAP@0.5: 0.7631
-  mAR: 0.8912
-```
-
----
-
-## 🧪 Inference
-
-Coming soon! Will include:
-- Sliding window inference for large volumes
-- Box NMS with configurable threshold
-- World coordinate conversion
-- JSON/CSV export
-- Visualization
-
----
-
-## 🔬 Data Augmentation
-
-The training pipeline includes comprehensive augmentation:
-
-**Spatial:**
-- Random zoom (0.8-1.2)
-- Random flip (3 axes, prob=0.5 each)
-- Random 90° rotation (prob=0.5)
-
-**Intensity:**
-- Gaussian noise (prob=0.1)
-- Gaussian smooth (prob=0.1)
-- Scale intensity (prob=0.15)
-- Shift intensity (prob=0.15)
-- Adjust contrast (prob=0.3, gamma=0.7-1.5)
-
-**Box handling:**
-- Boxes are converted to points before augmentation
-- Same transforms applied to images and points
-- Points converted back to boxes
-- Invalid boxes (outside image) are removed
-
----
-
-## 🎛️ Hyperparameters
-
-### Model Architecture
-
-```python
-# Anchor shapes (adjust for your lesion sizes)
-base_anchor_shapes = [[6,8,4], [8,6,5], [10,10,6]]
-
-# FPN returned layers (lower = higher resolution for small lesions)
-returned_layers = [1, 2]  # Use layers 1 and 2
-
-# ResNet stride configuration
-conv1_t_stride = [2, 2, 1]  # Less downsampling in Z for medical images
-```
-
-### Training Configuration
-
-```python
-# ATSS matcher
-num_candidates = 4          # Number of candidate anchors per GT
-center_in_gt = False        # Relaxed matching for small objects
-
-# Hard negative sampler
-batch_size_per_image = 64   # Samples per image
-positive_fraction = 0.3     # 30% positive, 70% negative
-pool_size = 20
-min_neg = 16
-
-# NMS parameters
-score_thresh = 0.02         # Confidence threshold
-nms_thresh = 0.22           # IoU threshold for NMS
-detections_per_img = 100    # Max detections per image
-```
-
-### Optimizer & Scheduler
-
-```python
-# SGD with momentum
-optimizer = torch.optim.SGD(
-    params,
-    lr=1e-2,
-    momentum=0.9,
-    weight_decay=3e-5,
-    nesterov=True
-)
-
-# Step LR scheduler
-scheduler = torch.optim.lr_scheduler.StepLR(
-    optimizer,
-    step_size=50,
-    gamma=0.1
-)
-```
-
----
-
-## 📈 Monitoring
-
-**TensorBoard:**
 ```bash
-tensorboard --logdir outputs_detection/tensorboard
+bash test.sh
+# or
+python3 nndet_simple.py --mode test
 ```
 
-**Metrics tracked:**
-- Training: total loss, classification loss, box regression loss, learning rate
-- Validation: mAP, mAR (at various IoU thresholds)
+**Output:**
+- `predictions.json`: Bounding boxes, scores, classes
+- `predictions_nifti/*.nii.gz`: Binary masks (if `save_nifti: true` in config)
+
+**Configuration Verification:**  
+Automatically checks checkpoint compatibility:
+- ✅ Backbone, num_classes, anchor_shapes
+- ⚠️ Warns if mismatch detected!
 
 ---
 
-## 🗂️ Outputs
+### **4️⃣ Tuning Detection Threshold**
 
+If you get too many/few detections, edit `config.yaml`:
+
+```yaml
+detection:
+  score_thresh_test: 0.35  # Higher = fewer detections (more strict)
+  detections_per_img_test: 5  # Lower = only top-N confident
+```
+
+**💡 Tips:**
+- **Too many false positives?** → Increase `score_thresh_test` (e.g., 0.3 → 0.4)
+- **Missing lesions?** → Decrease `score_thresh_test` (e.g., 0.3 → 0.2)
+- **Scores always low (~0.3)?** → Model needs more training epochs
+
+---
+
+### **Anchor Optimization (K-Means)**
+
+```bash
+# Run anchor optimization (reads from config.yaml)
+bash run_optimize_anchors.sh
+```
+
+**Output:**
+- `./eda/optimized_anchors.json` - Anchor shapes + recommended patch sizes (auto-loaded during training)
+- `./eda/anchor_optimization.png` - Visualization of lesion distribution
+- `./eda/optimal_k_curve.png` - IoU vs number of anchors (if find_optimal_k=true)
+
+**Note:** All parameters are read from `config.yaml`. To change settings (e.g., `merge_distance_mm`, `num_anchors`), edit the config file.
+
+**Visualize Box Merging:**
+
+To save sample cases showing before/after box merging, set in `config.yaml`:
+```yaml
+anchor:
+  save_samples: true
+  num_samples: 5
+```
+
+Then run:
+```bash
+bash run_optimize_anchors.sh
+```
+
+**Output:** `./eda/samples/sample_XX_*/`
+- `image.nii.gz`: Original image
+- `mask_original.nii.gz`: Original segmentation
+- `boxes_before_merge.nii.gz`: Boxes BEFORE merging (20mm)
+- `boxes_after_merge.nii.gz`: Boxes AFTER merging
+- `info.txt`: Detailed box information
+
+---
+
+## 📊 Model Configuration
+
+**Architecture:**
+- Backbone: ResNet50/101 + FPN (3 layers)
+- Detection head: RetinaNet (Focal Loss + Smooth L1)
+- Matcher: ATSS (Adaptive Training Sample Selection)
+- Anchors: K-Means optimized or default 5 shapes
+
+**Training:**
+- Optimizer: SGD (momentum=0.9, weight_decay=1e-4)
+- Scheduler: Warmup (10 epochs) + Step decay
+- AMP: Enabled by default (mixed precision)
+- Data: 80% train, 20% validation
+
+---
+
+## 🔧 Checkpoint Management
+
+Checkpoints are saved with backbone name:
 ```
 outputs_detection/
-├── best_model.pth              # Best model by mAP
-├── checkpoint_epoch10.pth      # Checkpoints every 10 epochs
-├── checkpoint_epoch20.pth
-├── ...
-└── tensorboard/                # TensorBoard logs
-    └── events.out.tfevents.*
+├── best_model_resnet50.pth
+├── best_model_resnet101.pth
+└── tensorboard/
 ```
 
-**Model checkpoint contains:**
-- `model_state_dict`: Network weights
-- `optimizer_state_dict`: Optimizer state
-- `epoch`: Epoch number
-- `best_metric`: Best mAP score (for best_model.pth)
+Each checkpoint contains:
+- `model_state_dict`
+- `optimizer_state_dict`
+- `epoch`, `best_metric`
+- `backbone`, `anchor_shapes`
 
 ---
 
-## 🎓 Reference
+## 📈 Output
 
-This implementation is based on:
+**Training logs:**
+```
+Epoch 50/1000
+─────────────────────────
+📉 Train Loss: 0.1234 | LR: 4.50e-03
 
-**MONAI Detection Module:**
-- [MONAI Detection Tutorial](https://github.com/Project-MONAI/tutorials/tree/main/detection)
-- [MONAI Documentation](https://docs.monai.io/)
+📊 Detection Statistics (IoU ≥ 0.1):
+   ├─ True Positives:  1234
+   ├─ False Positives:  256
+   ├─ False Negatives:  800
+   ├─ Sensitivity:     60.7%
+   └─ Precision:       82.8%
 
-**Papers:**
-- **RetinaNet:** [Focal Loss for Dense Object Detection](https://arxiv.org/abs/1708.02002) (Lin et al., ICCV 2017)
-- **ATSS:** [Bridging the Gap Between Anchor-based and Anchor-free Detection](https://arxiv.org/abs/1912.02424) (Zhang et al., CVPR 2020)
-- **nnDetection:** [A Self-Configuring Method for Medical Object Detection](https://arxiv.org/abs/2106.00817) (Baumgartner et al., MICCAI 2021)
+📈 Validation Results:
+  ├─ mAP@0.10-0.50: 0.3456
+  ├─ AP@0.10:       0.4123
+  ├─ Sensitivity:   60.7%
+  └─ 🎯 Avg Metric:  0.3456 ← New Best! 🏆
+   💾 Saved: best_model_resnet50.pth
+```
 
----
-
-## 🤝 Acknowledgements
-
-- **MONAI Team** for the excellent detection module
-- **nnDetection** for design insights and best practices
-- **LUNA16 Challenge** for evaluation methodology
-
----
-
-## 📝 Citation
-
-If you use this code, please cite MONAI and the relevant papers:
-
-```bibtex
-@article{cardoso2022monai,
-  title={MONAI: An open-source framework for deep learning in healthcare},
-  author={Cardoso, M Jorge and others},
-  journal={arXiv preprint arXiv:2211.02701},
-  year={2022}
-}
-
-@inproceedings{lin2017focal,
-  title={Focal loss for dense object detection},
-  author={Lin, Tsung-Yi and Goyal, Priya and Girshick, Ross and He, Kaiming and Doll{\'a}r, Piotr},
-  booktitle={ICCV},
-  year={2017}
-}
+**Test output:**
+```
+./outputs_detection/
+├── test_predictions.json  # All predictions
+└── debug_samples/         # Visual debugging (optional)
+    ├── image.nii.gz
+    ├── gt_boxes.nii.gz
+    ├── pred_boxes.nii.gz
+    └── info.txt
 ```
 
 ---
 
-## 📄 License
+## 🎓 Tips
 
-This project is licensed under the Apache License 2.0 (same as MONAI).
+**For better performance:**
+1. ✅ Run `run_optimize_anchors.sh` before training
+2. ✅ Use ResNet101 for larger datasets (>500 images)
+3. ✅ Adjust `score_thresh`: 0.1 (more detections) ↔ 0.3 (higher precision)
+4. ✅ Increase `patch_size` if you have large GPU memory
+5. ✅ Use `--debug` for verbose box extraction logs
+
+**For faster training:**
+- Reduce `patch_size` (e.g., `192 192 16`)
+- Use ResNet50 instead of ResNet101
+- Reduce `batch_size` if OOM
+
+---
+
+## 📁 Project Structure
+
+```
+DetSeg3D/
+├── nndet_simple.py              # Main script (all-in-one)
+├── train_ddp.sh                 # Multi-GPU training
+├── test.sh                      # Inference
+├── optimize_anchors.py          # K-Means anchor optimization
+├── run_optimize_anchors.sh      # Anchor optimization script
+└── ANCHOR_OPTIMIZATION.md       # Detailed anchor guide
+```
+
+---
+
+## 🔗 References
+
+- **MONAI**: https://monai.io/
+- **RetinaNet**: [Lin et al., 2017](https://arxiv.org/abs/1708.02002)
+- **ATSS**: [Zhang et al., 2020](https://arxiv.org/abs/1912.02424)
+- **Anchor Optimization**: [Redmon et al., 2016](https://arxiv.org/abs/1506.02640)
+
+---
+
+## 📝 License
+
+MIT
 
 ---
 
 ## 🐛 Troubleshooting
 
-### Out of Memory (OOM)
+**Q: Architecture mismatch error?**  
+A: Checkpoint was trained with different anchors. Re-train or check `anchor_shapes`.
 
-**Solution 1:** Reduce patch size
-```bash
---patch_size 128 128 64  # Smaller patches
-```
+**Q: Zero detections?**  
+A: Lower `score_thresh` (e.g., `0.1`) or train longer.
 
-**Solution 2:** Reduce batch size
-```bash
---batch_size 1  # Already minimal
-```
+**Q: OOM (Out of Memory)?**  
+A: Reduce `batch_size` or `patch_size`.
 
-**Solution 3:** Disable AMP (if causing issues)
-```bash
---no-amp  # Use FP32 instead of FP16
-```
-
-### No boxes detected from labels
-
-**Check 1:** Verify label format (binary mask, 0=background, 1=foreground)
-
-**Check 2:** Adjust minimum size threshold
-```python
-# In GenerateBoxMaskd class
-min_size = 5  # Reduce from 10
-```
-
-### Low mAP scores
-
-**Solution 1:** Adjust anchor shapes for your lesion sizes
-```python
-base_anchor_shapes = [[4,4,2], [6,6,3], [8,8,4]]  # Smaller for tiny lesions
-```
-
-**Solution 2:** Use more FPN layers
-```python
-returned_layers = [0, 1, 2]  # Include layer 0 (highest resolution)
-```
-
-**Solution 3:** Train longer
-```bash
---epochs 200  # More epochs for convergence
-```
+**Q: DDP hangs?**  
+A: Check multi-GPU setup, ensure all GPUs are available.
 
 ---
 
-## 🔮 Future Work
-
-- [ ] Test-time augmentation (TTA)
-- [ ] Ensemble inference
-- [ ] Segmentation refinement (Stage 2)
-- [ ] 3D visualization tools
-- [ ] FROC curve evaluation
-- [ ] Cross-validation support
-- [x] DistributedDataParallel (DDP) for multi-GPU training (`torchrun` support)
-
----
-
-**Happy detecting! 🎯**
+**For detailed anchor optimization guide, see `ANCHOR_OPTIMIZATION.md`**

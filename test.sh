@@ -1,30 +1,29 @@
 #!/bin/bash
 
 # ============================================================================
-# Test Script for 3D Detection
+# 3D Detection: Inference/Testing
 # ============================================================================
-# 
-# IMPORTANT: Change these paths to your actual TEST data
-# Current paths point to TRAINING data (AMC_train) - 747 images
-# 
-# For test data, use something like:
-#   - AMC_test/hemo/image
-#   - AMC_val/hemo/image
+# Reads all parameters from config.yaml and runs inference
+# To modify settings (test data path, score_thresh, etc.), edit config.yaml
 # ============================================================================
 
-# Training data (DO NOT USE for testing)
-# TRAIN_IMAGE_DIR="/mnt/nas206/ANO_DET/GAN_brain/NeuroCAD_preprocessing/1.Asan_data/Asan/AMC_train/hemo/image"
+echo "🔍 Starting inference..."
+echo ""
 
-# ⚠️ CHANGE THIS to your actual test data directory
-TEST_IMAGE_DIR="/mnt/nas206/ANO_DET/GAN_brain/NeuroCAD_preprocessing/1.Asan_data/Asan/AMC_test/hemo/image"
-TEST_LABEL_DIR="/mnt/nas206/ANO_DET/GAN_brain/NeuroCAD_preprocessing/1.Asan_data/Asan/AMC_test/hemo/mask"
+# Run testing (all parameters from config.yaml)
+python3 nndet_simple.py --mode test
 
-# If you don't have separate test data, you can use validation split from training
-# TEST_IMAGE_DIR="./data/val/images"
+# For custom config file:
+# python3 nndet_simple.py --mode test --config my_config.yaml
 
-python nndet_simple.py --mode test \
-	--save_predictions \
-	--test_image_dir "${TEST_IMAGE_DIR}" \
-	--test_label_dir "${TEST_LABEL_DIR}" \
-	--checkpoint ./outputs_detection/best_model.pth \
-	--score_thresh 0.001  # Use 0.001 for early-stage models, 0.02 for well-trained
+echo ""
+echo "============================================================"
+echo "Testing Notes:"
+echo "  - All parameters loaded from config.yaml"
+echo "  - Checkpoint: ./outputs_detection/best_model_<backbone>.pth"
+echo "  - Test data: Set test_image_dir in config.yaml"
+echo ""
+echo "Output:"
+echo "  - predictions.json            : Box coordinates, scores, classes"
+echo "  - predictions_nifti/*.nii.gz  : Binary masks (if save_nifti=true)"
+echo "============================================================"
