@@ -336,21 +336,22 @@ def recommend_patch_size(image_shapes, lesion_sizes, spacings):
     print(f"   - Lesion: {median_lesion_mm[0]:.1f} × {median_lesion_mm[1]:.1f} × {median_lesion_mm[2]:.1f} mm")
     
     # 3. Training patch size recommendation
-    # Rule: 1.5-2x median lesion size to include context
-    train_patch_raw = (percentile_75_lesion * 1.5).astype(int)
+    # Rule for DETECTION: Use ~75% of image size (detection needs wide context!)
+    # This is more aggressive than segmentation (which uses 1.5-2x lesion size)
+    train_patch_raw = (median_img_shape * 0.75).astype(int)
     
     # Round to nearest multiple of 16 for GPU efficiency
     def round_to_multiple(x, base=16):
         return int(np.round(x / base) * base)
     
     train_patch_size = np.array([
-        round_to_multiple(train_patch_raw[0]),  # Width
-        round_to_multiple(train_patch_raw[1]),  # Height
+        round_to_multiple(train_patch_raw[1]),  # Width (swap H/W for [W,H,D] output)
+        round_to_multiple(train_patch_raw[0]),  # Height
         max(round_to_multiple(train_patch_raw[2], base=4), 16)  # Depth (at least 16)
     ])
     
-    # Ensure minimum size
-    train_patch_size = np.maximum(train_patch_size, [128, 128, 16])
+    # Ensure minimum size (but allow larger patches for detection)
+    train_patch_size = np.maximum(train_patch_size, [256, 256, 20])
     
     # 4. Validation patch size recommendation
     # Rule: Use full image if median < 640, else use slightly larger than training
@@ -368,7 +369,7 @@ def recommend_patch_size(image_shapes, lesion_sizes, spacings):
     
     print(f"\n🎯 Recommended Patch Sizes:")
     print(f"   - Training:   {tuple(train_patch_size)} (W, H, D)")
-    print(f"     └─ Rationale: 1.5× 75th %ile lesion size, rounded to multiples of 16")
+    print(f"     └─ Rationale: ~75% of median image size (detection needs wide context!)")
     print(f"   - Validation: {val_patch_desc}")
     print(f"     └─ Rationale: {'Full image (median < 640)' if val_patch_size is None else 'Larger than training'}")
     

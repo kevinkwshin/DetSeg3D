@@ -174,20 +174,32 @@ Automatically checks checkpoint compatibility:
 
 ---
 
-### **4️⃣ Tuning Detection Threshold**
+### **4️⃣ Tuning Detection Parameters**
 
-If you get too many/few detections, edit `config.yaml`:
+If you get too many/few detections or duplicates, edit `config.yaml`:
 
 ```yaml
 detection:
   score_thresh_test: 0.35  # Higher = fewer detections (more strict)
+  nms_thresh_test: 0.15    # Lower = stricter NMS (remove more overlaps)
   detections_per_img_test: 5  # Lower = only top-N confident
 ```
 
 **💡 Tips:**
-- **Too many false positives?** → Increase `score_thresh_test` (e.g., 0.3 → 0.4)
-- **Missing lesions?** → Decrease `score_thresh_test` (e.g., 0.3 → 0.2)
-- **Scores always low (~0.3)?** → Model needs more training epochs
+
+**Problem: Too many false positives?**
+- → Increase `score_thresh_test` (e.g., 0.3 → 0.4)
+
+**Problem: Missing lesions?**
+- → Decrease `score_thresh_test` (e.g., 0.3 → 0.2)
+
+**Problem: Duplicate detections (multiple boxes on same lesion)?**
+- → Decrease `nms_thresh_test` (e.g., 0.22 → 0.15)
+- → NMS removes overlapping boxes with IoU > threshold
+
+**Problem: Scores always low (~0.3)?**
+- → Model needs more training epochs
+- → Check if anchors are optimized (`bash run_optimize_anchors.sh`)
 
 ---
 

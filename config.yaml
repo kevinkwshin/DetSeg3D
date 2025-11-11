@@ -39,7 +39,7 @@ anchor:
 # Training Hyperparameters
 training:
   epochs: 1000
-  batch_size: 1  # Batch size per GPU
+  batch_size: 2  # Batch size per GPU
   lr: 0.005  # Initial learning rate (5e-3)
   
   # Training patch size [W, H, D]
@@ -49,10 +49,10 @@ training:
   # 💡 Recommended workflow:
   #    1. Run: bash run_optimize_anchors.sh (analyzes your dataset)
   #    2. Run: bash train_ddp.sh (uses optimized values automatically)
-  patch_size: [256, 256, 24]
+  patch_size: [384, 384, 24]
   
-  val_interval: 10  # Validation every N epochs
-  gradient_accumulation_steps: 1
+  val_interval: 1  # Validation every N epochs
+  gradient_accumulation_steps: 2
   
   # Optimizer
   optimizer:
@@ -69,16 +69,16 @@ training:
 # Detection Parameters
 detection:
   # Training/Validation
-  score_thresh_train: 0.2
-  nms_thresh_train: 0.2
-  detections_per_img_train: 10
-  topk_candidates_per_level_train: 1000
+  score_thresh_train: 0.2  # Min confidence for validation
+  nms_thresh_train: 0.2  # NMS IoU threshold: lower = stricter (remove more overlaps)
+  detections_per_img_train: 10  # Max detections per image for validation
+  topk_candidates_per_level_train: 1000  # Top-K candidates before NMS
   
   # Testing/Inference
   score_thresh_test: 0.3  # Min confidence: 0.2 (more detections) ↔ 0.4 (higher precision)
-  nms_thresh_test: 0.22
+  nms_thresh_test: 0.22  # NMS IoU threshold: 0.1-0.3 recommended (lower = stricter NMS)
   detections_per_img_test: 10  # Max detections: 10-20 recommended (top-N only)
-  topk_candidates_per_level_test: 100
+  topk_candidates_per_level_test: 100  # Top-K candidates before NMS
   
   # Checkpoint (optional - auto-determined if null)
   # Format: ./outputs_detection/best_model_{backbone}.pth
